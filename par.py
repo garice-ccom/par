@@ -1,7 +1,7 @@
 """
 par.py
 G.Rice 6/20/2012
-V0.3.0 20150225
+V0.3.2 201603218
 
 This module includes a number of different classes and methods for working with
 Kongsberg all files, each of which are intended to serve at least one of three
@@ -36,6 +36,7 @@ from matplotlib import pyplot as plt
 from mpl_toolkits.basemap import pyproj
 import datetime as dtm
 import sys, os, copy
+import pickle
 from glob import glob
 try:
     import tables as tbl
@@ -169,6 +170,10 @@ class allRead:
             self.reset()
             # make map into an array and sort by the time stamp
             self.map.finalize()
+            # set the number of watercolumn packets into the map object
+            if self.map.packdir.has_key('107'):
+                pinglist = list(set(self.map.packdir['107'][:,3]))
+                self.map.numwc = len(pinglist)
             if self.error:
                 print
             else:
@@ -205,7 +210,6 @@ class allRead:
             print 'file map saved to ' + mapfilename
         else:
             print 'no map to save.'
-            
         
     def getrecord(self, recordtype, recordnum):
         """
@@ -251,40 +255,44 @@ class allRead:
             self.mapfile()
         pinglist = list(set(self.map.packdir['107'][:,3]))
         pinglist.sort()
-        pingnum = pinglist[recordnum]
-        inx = np.nonzero(self.map.packdir['107'][:,3] == pingnum)[0]
-        ping = self.getrecord(107,inx[0])
-        numbeams = ping.header['Total#Beams']
-        recordsremaining = range(ping.header['#OfDatagrams'])
-        recordsremaining.pop(ping.header['Datagram#']-1)
-        totalsamples, subbeams = ping.ampdata.shape
-        rx = np.zeros(numbeams, dtype = Data107.nrx_dtype)
-        ampdata = np.zeros((totalsamples, numbeams), dtype = np.float32)
-        rx[:subbeams] = ping.rx
-        ampdata[:,:subbeams] = ping.ampdata
-        beamcount = subbeams
-        if len(inx) > 1:
-            for n in inx[1:]:
-                ping = self.getrecord(107, n)
-                recordnumber = recordsremaining.index(ping.header['Datagram#']-1)
-                recordsremaining.pop(recordnumber)
-                numsamples, subbeams = ping.ampdata.shape
-                if numsamples > totalsamples:
-                    temp = np.zeros((numsamples - totalsamples, numbeams), dtype = 'b')
-                    ampdata = np.append(ampdata, temp, axis = 0)
-                    totalsamples = numsamples
-                rx[beamcount:beamcount+subbeams] = ping.rx
-                ampdata[:numsamples,beamcount:beamcount+subbeams] = ping.ampdata
-                beamcount += subbeams
-        if len(recordsremaining) > 0:
-            print "Warning: Not all WC records have the same time stamp!"
-        sortidx = np.argsort(rx['BeamPointingAngle'])
-        self.packet.subpack.rx = rx[sortidx]
-        self.packet.subpack.ampdata = ampdata[:,sortidx]
-        self.packet.subpack.header[2] = 1
-        self.packet.subpack.header[3] = 1
-        self.packet.subpack.header[6] = numbeams
-        return self.packet.subpack
+        if recordnum >= len(pinglist):
+            print str(len(pinglist)) + ' water column records available.'
+            return None
+        else:
+            pingnum = pinglist[recordnum]
+            inx = np.nonzero(self.map.packdir['107'][:,3] == pingnum)[0]
+            ping = self.getrecord(107,inx[0])
+            numbeams = ping.header['Total#Beams']
+            recordsremaining = range(ping.header['#OfDatagrams'])
+            recordsremaining.pop(ping.header['Datagram#']-1)
+            totalsamples, subbeams = ping.ampdata.shape
+            rx = np.zeros(numbeams, dtype = Data107.nrx_dtype)
+            ampdata = np.zeros((totalsamples, numbeams), dtype = np.float32)
+            rx[:subbeams] = ping.rx
+            ampdata[:,:subbeams] = ping.ampdata
+            beamcount = subbeams
+            if len(inx) > 1:
+                for n in inx[1:]:
+                    ping = self.getrecord(107, n)
+                    recordnumber = recordsremaining.index(ping.header['Datagram#']-1)
+                    recordsremaining.pop(recordnumber)
+                    numsamples, subbeams = ping.ampdata.shape
+                    if numsamples > totalsamples:
+                        temp = np.zeros((numsamples - totalsamples, numbeams), dtype = 'b')
+                        ampdata = np.append(ampdata, temp, axis = 0)
+                        totalsamples = numsamples
+                    rx[beamcount:beamcount+subbeams] = ping.rx
+                    ampdata[:numsamples,beamcount:beamcount+subbeams] = ping.ampdata
+                    beamcount += subbeams
+            if len(recordsremaining) > 0:
+                print "Warning: Not all WC records have the same time stamp!"
+            sortidx = np.argsort(rx['BeamPointingAngle'])
+            self.packet.subpack.rx = rx[sortidx]
+            self.packet.subpack.ampdata = ampdata[:,sortidx]
+            self.packet.subpack.header[2] = 1
+            self.packet.subpack.header[3] = 1
+            self.packet.subpack.header[6] = numbeams
+            return self.packet.subpack
             
     def display(self):
         """
@@ -417,25 +425,40 @@ class allRead:
             pitch = []
             heave = []
             heading = []
-            postime = []
+            exttime = []
             rollrate = []
             pitchrate = []
             yawrate = []
             downvel = []
             numatt = len(self.map.packdir['110'])
-            for m in range(numatt):
-                pav = self.getrecord(110, m)
-                time += list(self.packet.subpack.data['Time'])
-                roll += list(self.packet.subpack.data['Roll'])
-                pitch += list(self.packet.subpack.data['Pitch'])
-                heave += list(self.packet.subpack.data['Heave'])
-                heading += list(self.packet.subpack.data['Heading'])
-                postime += list(self.packet.subpack.source_data['Time1'].astype(np.float64) + pav._weektime)
-                rollrate += list(self.packet.subpack.source_data['RollRate'])
-                pitchrate += list(self.packet.subpack.source_data['PitchRate'])
-                yawrate += list(self.packet.subpack.source_data['YawRate'])
-                downvel += list(self.packet.subpack.source_data['DownVelocity'])
-            self.navarray['110'] = np.asarray(zip(time,roll,pitch,heave,heading,postime,rollrate,pitchrate,yawrate,downvel))
+            pav = self.getrecord(110,0)
+            if pav.source == 'GRP102':
+                for m in range(numatt):
+                    pav = self.getrecord(110, m)
+                    time += list(pav.data['Time'])
+                    roll += list(pav.data['Roll'])
+                    pitch += list(pav.data['Pitch'])
+                    heave += list(pav.data['Heave'])
+                    heading += list(pav.data['Heading'])
+                    exttime += list(pav.source_data['Time1'].astype(np.float64) + pav._weektime)
+                    rollrate += list(pav.source_data['RollRate'])
+                    pitchrate += list(pav.source_data['PitchRate'])
+                    yawrate += list(pav.source_data['YawRate'])
+                    downvel += list(pav.source_data['DownVelocity'])
+            elif pav.source == 'binary23':
+                for m in range(numatt):
+                    pav = self.getrecord(110, m)
+                    time += list(pav.data['Time'])
+                    roll += list(pav.data['Roll'])
+                    pitch += list(pav.data['Pitch'])
+                    heave += list(pav.data['Heave'])
+                    heading += list(pav.data['Heading'])
+                    exttime += list(pav.source_data['Seconds'] + pav.source_data['FracSeconds'])
+                    rollrate += list(pav.source_data['RollRate'])
+                    pitchrate += list(pav.source_data['PitchRate'])
+                    yawrate += list(pav.source_data['YawRate'])
+                    downvel += list(pav.source_data['DownVelocity'])
+            self.navarray['110'] = np.asarray(zip(time,roll,pitch,heave,heading,exttime,rollrate,pitchrate,yawrate,downvel))
         if self.map.packdir.has_key('104'):
             print 'creating altitude (depth) array'
             num = len(self.map.packdir['104'])
@@ -444,6 +467,33 @@ class allRead:
                 self.getrecord(104, n)
                 self.navarray['104'][n,0] = self.packet.gettime()
                 self.navarray['104'][n,1] = self.packet.subpack.header['Height']
+                
+    def save_navarray(self):
+        """
+        Creats an 'npy' file with the name of the all file that contains the
+        navigation array used.
+        """
+        if not self.__dict__.has_key('navarray'):
+            self._build_navarray()
+        try:
+            navfile = open(self.infilename[:-3] + 'nav','wb')
+            pickle.dump(self.navarray, navfile)
+            navfile.close()
+            print "Saved navarray to " + self.infilename[:-3] + 'nav'
+        except:
+            pass
+        
+    def load_navarray(self):
+        """
+        Loads an 'npy' file with the name of the all file that contains the
+        navigation array for this file name.
+        """
+        try:
+            navfile = open(self.infilename[:-3] + 'nav','rb')
+            self.navarray = pickle.load(navfile)
+            print "Loaded navarray from " + self.infilename[:-3] + "nav."
+        except:
+            print "No navarray file found."
             
     def plot_navarray(self):
         """
@@ -778,10 +828,12 @@ class Datagram:
         """
         Directs to the correct decoder.
         """
-        if self.dtype == 49:
+        if self.dtype == 48:
+            self.subpack = Data48(self.datablock, self.byteswap)
+        elif self.dtype == 49:
             self.subpack = Data49(self.datablock, self.byteswap)
         elif self.dtype == 51:
-            self.subpack = Data51(self.datablock, self.byteswap)
+            self.subpack = Data51(self.datablock, self.header['Model'], self.byteswap)
         elif self.dtype == 65:
             self.subpack = Data65(self.datablock, self.time, self.byteswap)
         elif self.dtype == 66:
@@ -847,6 +899,33 @@ class Datagram:
         if not self.__dict__.has_key('time'):
             self.maketime()
         return self.time
+        
+    def display(self):
+        """
+        Displays contents of the header to the command window.
+        """
+        for n,name in enumerate(self.header.dtype.names):
+            print name + ' : ' + str(self.header[n])
+
+class Data48:
+    """
+    PU information and status 0x30 / '0' / 48.
+    """
+    
+    hdr_dtype = np.dtype([('ByteOrderFlag','H'),('System Serial#','H'),
+        ('UDPPort1','H'),('UDPPort2','H'),('UDPPort3','H'),('UDPPort4','H'),
+        ('SystemDescriptor','I'),('PUSoftwareVersion','S16'),
+        ('BSPSoftwareVersion','S16'),('SonarHead/TransceiverSoftware1','S16'),
+        ('SonarHead/TransceiverSoftware2','S16'),('HostIPAddress','I'),
+        ('TXOpeningAngle','B'),('RXOpeningAngle','B'),('Spare1','I'),
+        ('Spare2','H'),('Spare3','B')])
+        
+    def __init__(self, datablock, byteswap = False):
+        """Catches the binary datablock and decodes the first section and calls
+        the decoder for the rest of the record."""
+        
+        hdr_sz = Data48.hdr_dtype.itemsize
+        self.header = np.frombuffer(datablock[:hdr_sz], dtype=Data48.hdr_dtype)[0]
         
     def display(self):
         """
@@ -927,7 +1006,7 @@ class Data51:
     
     hdr_dtype = np.dtype([('Counter','H'),('Seriel#','H'),('ContentIdentifier','H')])
         
-    def __init__(self, datablock, byteswap = False):
+    def __init__(self, datablock, model, byteswap = False):
         """Catches the binary datablock and decodes the first section and calls
         the decoder for the rest of the record."""
         hdr_sz = Data51.hdr_dtype.itemsize
@@ -946,9 +1025,12 @@ class Data51:
         elif content_type == 6:
             data_sz = np.frombuffer(datablock[hdr_sz:hdr_sz+2], dtype='H')[0]
             self.rawdata = datablock[hdr_sz+2:hdr_sz+2+data_sz]
-            self._parse_bscorr()
+            if model == 710:
+                self._parse_710_bscorr()
+            elif model == 122:
+                self._parse_122_bscorr()
             
-    def _parse_bscorr(self):
+    def _parse_710_bscorr(self):
         """
         Parse the BSCorr file.
         """
@@ -987,7 +1069,70 @@ class Data51:
                 self.powers.append(np.array(secpower))
             n += 1
 
-        
+    def _parse_122_bscorr(self):
+        """
+        Parse the BSCorr file.
+        """
+        c = self.rawdata.split('\n')
+        t = len(c) - 1 # no need to look at hex flag at end 
+        n = 0
+        header = True
+        section_idx = []
+        self.names =[]
+        self.swathnum = []
+        self.modes = []
+        self.powers = []
+        self.data = []
+        # find all the sections to be parsed
+        while n < t:
+            if header == False:
+                if (c[n][0] =='#') & (c[n+1][0] == '#'):
+                    section_idx.append(n)
+            else:
+                if c[n] == '# source level    lobe angle    lobe width':
+                    header = False
+            n += 1
+        section_idx.append(t)
+        for n in range(len(section_idx)-1):
+            m = section_idx[n]
+            end = section_idx[n+1]
+            name_prefix = c[m][2:]
+            if name_prefix == 'Shallow':
+                mode = 2
+            elif name_prefix == 'Medium':
+                mode = 3
+            elif name_prefix == 'Deep':
+                mode = 4
+            elif name_prefix == 'Very Deep':
+                mode = 5
+            else:
+                mode = -1
+                print 'mode type not recognized: ' + name_prefix
+            m += 1
+            while m < end:
+                if c[m][0] == '#':
+                    k = 1
+                    data = []
+                    swath_type = c[m][2:]
+                    if swath_type[:12] == 'Single swath':
+                        swath_num = 0
+                    elif swath_type == 'Dual swath 1':
+                        swath_num = 1
+                    elif swath_type == 'Dual swath 2':
+                        swath_num = 2
+                    else:
+                        swath_num = -1
+                        # print 'swath type not used: ' + swath_type
+                    self.names.append(name_prefix + ' - ' + swath_type)
+                    self.swathnum.append(swath_num)
+                    self.modes.append(mode)
+                    while c[m+k][0] != '#' and m+k+1 < end:
+                        info = [int(x) for x in c[m+k].split()]
+                        data.append(info)
+                        k += 1
+                    self.data.append(data)
+                m += 1
+    
     def display(self):
         """
         Displays contents of the header to the command window.
@@ -1199,6 +1344,9 @@ class Data66:
             n += 1
         self.data = np.asarray(data)
         self.freq = np.asarray(freq)
+        idx = self.freq.argsort()
+        self.freq = self.freq[idx]
+        self.data = self.data[idx]
             
     def plot(self):
         """
@@ -2063,7 +2211,7 @@ class Data107:
         ('TVGoffset','b'),('ScanningInfo','B'),('Spare','3B')])
     ntx_dtype = np.dtype([('TiltTx',"f"),('CenterFrequency',"I"),
         ('TransmitSector#','B'),('Spare','B')])
-    nrx_dtype = np.dtype([('BeamPointingAngle',"h"),('StartRangeSample#','H'),
+    nrx_dtype = np.dtype([('BeamPointingAngle',"f"),('StartRangeSample#','H'),
         ('NumberSamples','H'),('DetectedRange','H'),('TransmitSector#','B'),
         ('Beam#','B')])
         
@@ -2144,6 +2292,8 @@ class Data107:
         The TVG function removed (from the datagram definition) is
         func_TVG = X * log(R) + 2 * Absorption * R + OFS + C
         Set the kwarg 'usec' to False to avoid applying the header c value.
+        
+        Absorption should be supplied in dB / m.
         """
         x = self.header['TVGfunction']
         if usec:
@@ -2154,6 +2304,7 @@ class Data107:
         dt = self.header['SamplingFrequency']
         r = np.arange(len(self.ampdata)) * s / (2 * dt)
         f = x * np.log10(r) + 2 * absorption * r / 1000. + OFS + c
+        f[0] = OFS + c
         f.shape = (len(f), -1)
         self.ampdata -= f
         self.hasTVG = False
@@ -2177,7 +2328,10 @@ class Data107:
         plt.figure()
         im = plt.pcolormesh(X,Y,self.ampdata)
         plt.ylim((r.max(),0))
-        plt.colorbar()
+        c = plt.colorbar()
+        c.set_label('dB re $1\mu Pa$ at 1 meter')
+        plt.xlabel('Across Track (meters)')
+        plt.ylabel('Depth (meters)')
         cstd = np.nanstd(self.ampdata)
         cmean = np.nanmean(self.ampdata)
         im.set_clim((cmean-3*cstd, cmean+3*cstd))
@@ -2306,7 +2460,8 @@ class Data110:
                 ('LongitudinalAcceleration','f'),('TransverseAcceleration','f'),
                 ('DownAcceleration','f'),('Pad','H'),('CheckSum','H'),
                 ('MessageEnd','S2')])
-            self.source_data = np.fromiter(raw_data, dtype = source_dtype)
+            
+            self.source_data = np.fromiter(raw_data, dtype = source_dtype, count = self.numrecords)
             packettime = dtm.datetime.utcfromtimestamp(self.time)
             # subtract 1 because the first day of the year does not start with zero
             ordinal = packettime.toordinal()
@@ -2317,8 +2472,46 @@ class Data110:
             # 1970-1-1 is julian day 719163
             POSIXdays = ordinal - 719163. - dow
             self._weektime = POSIXdays * 24. * 3600.
+            self.source = 'GRP102'
+        elif raw_data[0][0][:2] == '\xaaQ':
+            source_dtype = np.dtype([('Header1','B'),('Header2','B'),
+                ('Seconds','>i'),('FracSeconds','>H'),('Latitude','>i'),
+                ('Longitude','>i'),('Height','>i'),('Heave','>h'),
+                ('NorthVelocity','>h'),('EastVelocity','>h'),
+                ('DownVelocity','>h'),('Roll','>h'),('Pitch','>h'),
+                ('Heading','>H'),('RollRate','>h'),('PitchRate','>h'),
+                ('YawRate','>h'),('StatusWord','>H'),('CheckSum','>H')])
+            source_usetype = np.dtype([('Header1','B'),('Header2','B'),
+                ('Seconds','i'),('FracSeconds','f'),('Latitude','f'),
+                ('Longitude','f'),('Height','f'),('Heave','f'),
+                ('NorthVelocity','f'),('EastVelocity','f'),
+                ('DownVelocity','f'),('Roll','f'),('Pitch','f'),
+                ('Heading','f'),('RollRate','f'),('PitchRate','f'),
+                ('YawRate','f'),('StatusWord','H'),('CheckSum','H')])
+            temp = np.fromiter(raw_data, dtype = source_dtype, count = self.numrecords)
+            self.source_data = temp
+            self.source_data = np.zeros(len(temp), dtype = source_usetype)
+            self.source_data['Header1'] = temp['Header1']
+            self.source_data['Header2'] = temp['Header2']
+            self.source_data['Seconds'] = temp['Seconds']
+            self.source_data['FracSeconds'] = 0.0001 * temp['FracSeconds'].astype(np.float32)
+            self.source_data['Latitude'] = 90. / 2**30 * temp['Latitude'].astype(np.float32)
+            self.source_data['Longitude'] = 90. / 2**30 * temp['Longitude'].astype(np.float32)
+            self.source_data['Height'] = 0.01 * temp['Height'].astype(np.float32)
+            self.source_data['Heave'] = 0.01 * temp['Heave'].astype(np.float32)
+            self.source_data['NorthVelocity'] = 0.01 * temp['NorthVelocity'].astype(np.float32)
+            self.source_data['EastVelocity'] = 0.01 * temp['EastVelocity'].astype(np.float32)
+            self.source_data['DownVelocity'] = 0.01 * temp['DownVelocity'].astype(np.float32)
+            self.source_data['Roll'] = 90. / 2**14 * temp['Roll'].astype(np.float32)
+            self.source_data['Pitch']  = 90. / 2**14 * temp['Pitch'].astype(np.float32)
+            self.source_data['Heading'] = 90. / 2**14 * temp['Heading'].astype(np.float32)
+            self.source_data['RollRate']  = 90. / 2**14 * temp['RollRate'].astype(np.float32)
+            self.source_data['PitchRate']  = 90. / 2**14 * temp['PitchRate'].astype(np.float32)
+            self.source_data['YawRate']  = 90. / 2**14 * temp['YawRate'].astype(np.float32)
+            self.source = 'binary23'
         else:
-            self.source_data = None
+            self.source_data = raw_data
+            self.source = 'Unknown'
         
     def display(self):
         """
@@ -2332,11 +2525,32 @@ class useall(allRead):
     Built as a subclass of the allRead class to perform higher level functions.
     The file is mapped and the navigation array is built upon init.
     """
-    def __init__(self, infilename, verbose = False, byteswap = False):
+    def __init__(self, infilename, reload_map = True, verbose = False, byteswap = False):
         allRead.__init__(self,infilename,verbose,byteswap)
-        self.mapfile()
-        self._build_navarray(allrecords = True)
-        self._build_runtime_array()
+        fname, ftype = infilename.rsplit('.',1)
+        if reload_map and os.path.exists(fname + '.par'):
+            self.loadfilemap()
+        else:
+            self.mapfile()
+            self.savefilemap()
+        
+        if reload_map and os.path.exists(fname + '.nav'):
+            self.load_navarray()
+        else:
+            self._build_navarray(allrecords = True)
+            self.save_navarray()
+        try:
+            self._build_runtime_array()
+            if np.any(self._runtime_array['RuntimePacket']['SonarHeadOrTransceiverStatus']):
+                print '***Sonar Head or Transceiver Status error found in Runtime Parameters***'
+            if np.any(self._runtime_array['RuntimePacket']['BSPStatus']):
+                print '***BSP Status error found in Runtime Parameters***'
+            if np.any(self._runtime_array['RuntimePacket']['ProcessingUnitStatus']):
+                print '***Processing Unit Status error found in Runtime Parameters***'
+            if np.any(self._runtime_array['RuntimePacket']['OperatorStationStatus']):
+                print '***Operator Station Status error found in Runtime Parameters***'
+        except KeyError:
+            print 'Warning: No Runtime records found in file.'
         self.reset()
         
     def is_dual_swath(self, POSIX = None):
@@ -2483,30 +2697,30 @@ class useall(allRead):
         # setting the filter length to four times the max response per JHC p.22
         filtertime = 4/max_freq 
         # plot the filter response with the roll / pitch
-        win = np.hanning(int(filtertime/dt))
-        win /= win.sum()
-        win_freq = fft.fftfreq(len(win), dt)
-        win_fft = fft.fft(win)
-        roll_lp = np.convolve(roll, win, mode = 'same')
-        roll_hp = roll - roll_lp
-        roll_hp_fft = fft.fft(roll_hp)
-        pitch_lp = np.convolve(pitch, win, mode = 'same')
-        pitch_hp = pitch - pitch_lp
-        pitch_hp_fft = fft.fft(pitch_hp)
-        filt_fig = plt.figure()
-        roll_ax = filt_fig.add_subplot(311)
-        roll_ax.plot(freq, np.log10(np.abs(roll_fft)))
-        roll_ax.plot(freq, np.log10(np.abs(roll_hp_fft)))
-        roll_ax.legend(('Raw','Filtered'))
-        roll_ax.set_title('Roll')
-        win_ax = filt_fig.add_subplot(312, sharex = roll_ax)
-        win_ax.plot(win_freq, np.log10(np.abs(win_fft)))
-        pitch_ax = filt_fig.add_subplot(313, sharex = roll_ax, sharey = roll_ax)
-        pitch_ax.plot(freq, np.log10(np.abs(pitch_fft)))
-        pitch_ax.plot(freq, np.log10(np.abs(pitch_hp_fft)))
-        pitch_ax.set_xlabel('Frequency (Hz)')
-        pitch_ax.set_title('Pitch')
-        filt_fig.suptitle('Filter length set to ' + str(filtertime.round()) + ' seconds.')
+#        win = np.hanning(int(filtertime/dt))
+#        win /= win.sum()
+#        win_freq = fft.fftfreq(len(win), dt)
+#        win_fft = fft.fft(win)
+#        roll_lp = np.convolve(roll, win, mode = 'same')
+#        roll_hp = roll - roll_lp
+#        roll_hp_fft = fft.fft(roll_hp)
+#        pitch_lp = np.convolve(pitch, win, mode = 'same')
+#        pitch_hp = pitch - pitch_lp
+#        pitch_hp_fft = fft.fft(pitch_hp)
+#        filt_fig = plt.figure()
+#        roll_ax = filt_fig.add_subplot(311)
+#        roll_ax.plot(freq, np.log10(np.abs(roll_fft)))
+#        roll_ax.plot(freq, np.log10(np.abs(roll_hp_fft)))
+#        roll_ax.legend(('Raw','Filtered'))
+#        roll_ax.set_title('Roll')
+#        win_ax = filt_fig.add_subplot(312, sharex = roll_ax)
+#        win_ax.plot(win_freq, np.log10(np.abs(win_fft)))
+#        pitch_ax = filt_fig.add_subplot(313, sharex = roll_ax, sharey = roll_ax)
+#        pitch_ax.plot(freq, np.log10(np.abs(pitch_fft)))
+#        pitch_ax.plot(freq, np.log10(np.abs(pitch_hp_fft)))
+#        pitch_ax.set_xlabel('Frequency (Hz)')
+#        pitch_ax.set_title('Pitch')
+#        filt_fig.suptitle('Filter length set to ' + str(filtertime.round()) + ' seconds.')
     
         # Get the average ping period for setting the filter length
         ping_period = (txtime[1:,0] - txtime[:-1,0]).mean()
@@ -2525,12 +2739,15 @@ class useall(allRead):
         win = np.hanning(filter_len)
         win /= win.sum()
         low_pass = np.zeros(depth88.shape)
-        high_pass = np.zeros(depth88.shape)
         for n in range(numrx):
             low_pass[:,n] = np.convolve(depth88[:,n], win, mode='same')
-        high_pass = depth88 - low_pass
-    
+        if filter_len > 1:
+            high_pass = depth88 - low_pass
+        else:
+            high_pass = depth88
         # adjust the attitude range
+        if rem == 0:
+            rem = 1
         txheave = txheave[rem:-rem].astype(np.dtype([('Heave (m)',np.float)]))
         txpitch = txpitch[rem:-rem,:].astype(np.dtype([('Pitch (deg)',np.float)]))
         txpitchvel = txpitchvel[rem:-rem,:].astype(np.dtype([('Pitch Rate (deg/s)',np.float)]))
@@ -2560,17 +2777,32 @@ class useall(allRead):
                     result = np.polyfit(across88[rem+n,txid], high_pass[rem+n,txid],1)
                     sector_mean[n,m] = result[1]
                     sector_slope[n,m] = 180. * np.arctan(result[0])/np.pi
-        # then over the roll rate vs beam offset
-        # this assumes that the across track distance is the same for all pings.
-        # maybe this should be done by across track bin instead?
-        along_mean = np.zeros(numrx, dtype = np.dtype([('Roll Rate Mean Correlation',np.float)]))
-        along_slope = np.zeros(numrx, dtype = np.dtype([('Roll Rate Slope Correlation',np.float)]))
+        # This section correlates a time delay by beam
+        # The bias angle (flat seafloor, as in low passed, minus original) is computed and
+        # regressed against the roll rate.
+        along_mean = np.zeros(numrx, dtype = np.dtype([('Beam Angle Bias to Roll Rate Mean',np.float)]))
+        along_slope = np.zeros(numrx, dtype = np.dtype([('Beam Angle Bias to Roll Rate Slope',np.float)]))
+        along_residuals = np.zeros(numrx, dtype = np.dtype([('Beam Angle Bias to Roll Rate Residual',np.float)]))
+        # find the angles
+        orig_angle = 180. / np.pi * np.arctan2(depth88,across88)
+        # see notes in green book from 20160208
+        depths = low_pass.mean(axis = 1)
+        depths = np.tile(depths, [numrx,1])
+        range_at_angle = np.sqrt(across88**2 + depths.T**2)
+        bias_angle = orig_angle - 180. / np.pi * np.arccos(low_pass / (range_at_angle - high_pass/np.cos(orig_angle)))
+        bias_angle = bias_angle[rem:-rem, :].astype(np.dtype([('Beam Angle Bias (Deg)',np.float)]))
+        # for each beam, fit a line to corralate the angle bias to the roll rate
         for n in range(numrx):
-            txid = txnum[rem:-rem,n]
-            temp = rxrollvel[range(good_data_range),n].astype(np.float)
-            result = np.polyfit(temp, high_pass[rem:-rem, n], 1)
+            xtemp = rxrollvel[range(good_data_range),n].astype(np.float)
+            ytemp = bias_angle[:,n].astype(np.float)
+            # the fit
+            result = np.polyfit(xtemp, ytemp, 1)
             along_mean[n] = result[1]
             along_slope[n] = result[0]
+            # find the residuals
+            linefunc = np.poly1d(result)
+            bias_estimate = linefunc(xtemp)
+            along_residuals[n] = np.std(bias_estimate - ytemp)
             
         # plot the bathymetry
         print 'plotting,',
@@ -2585,7 +2817,6 @@ class useall(allRead):
         ax2.set_title('Low Pass Depth')
         plt.colorbar(im2)
         ax3 = fig.add_subplot(122, sharex = ax1, sharey = ax1)
-    
         im3 = ax3.imshow(high_pass[rem:-rem,:], aspect = 'auto', interpolation = 'none')
         hp_mean = np.nanmean(high_pass[rem:-rem,:])
         hp_std = np.nanstd(high_pass[rem:-rem,:])
@@ -2600,38 +2831,41 @@ class useall(allRead):
         
         # plot scatter plots
         self._plot_wobble_scatter(rxrollvel[:,numrx/2], mainswath_slope, title = 'Roll Rate vs Swath Slope')
-        self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,0], title = 'Roll Rate vs Sector 0 Slope')
-        self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,1], title = 'Roll Rate vs Sector 1 Slope')
-        self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,2], title = 'Roll Rate vs Sector 2 Slope')
-        self._plot_wobble_scatter(recheavevel, swath_mean, title = 'Heave Rate vs Swath Mean')
-        self._plot_wobble_scatter(txpitchvel[:,1], swath_mean, title = 'Pitch Rate vs Swath Mean')
+#        self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,0], title = 'Roll Rate vs Sector 0 Slope')
+#        self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,1], title = 'Roll Rate vs Sector 1 Slope')
+#        self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,6], title = 'Roll Rate vs Sector 6 Slope')
+#        self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,7], title = 'Roll Rate vs Sector 7 Slope')
+#        self._plot_wobble_scatter(recheavevel, swath_mean, title = 'Heave Rate vs Swath Mean')
+#        self._plot_wobble_scatter(txpitchvel[:,1], swath_mean, title = 'Pitch Rate vs Swath Mean')
 
         # plot the along track fits
         beams = np.arange(numrx)
+        temp = 180. / np.pi * np.arctan2(low_pass[rem:-rem,:], across88[rem:-rem, :]) - 90
+        pointing_angles = temp.mean(axis = 0).astype(np.dtype([('Pointing Angle (Deg)',np.float)]))
         beams = beams.astype(np.dtype([('Beam Number',np.float)]))
         across_mean_range = across88.mean(axis = 0)
         across_mean_range = across_mean_range.astype(np.dtype([('Across Track Range (m)',np.float)]))
-        self._plot_wobble_scatter(across_mean_range, along_slope, title = 'Depth bias to Roll Rate Slope vs Across Track Distance', txid = beamtx)
+        self._plot_wobble_scatter(pointing_angles, along_slope, title = 'Beam Angular Bias to Roll Rate Slope Fit vs Across Track Distance', txid = beamtx)
         #self._plot_wobble_scatter(beams, along_mean, title = 'Interept of fit to Roll Rate vs Beam Number')
 
-        # plot the first difference acrosstrack
-        beam_diff = np.arange(numrx-1)
-        beam_diff = beam_diff.astype(np.dtype([('Beam Difference Number',np.float)]))
-        across_slope = (along_slope['Roll Rate Slope Correlation'][1:] - along_slope['Roll Rate Slope Correlation'][:-1]
-            ) / (across_mean_range['Across Track Range (m)'][1:] - across_mean_range['Across Track Range (m)'][:-1])
-        across_slope = across_slope.astype(np.dtype([('Delay (s)',np.float)]))
-        self._plot_wobble_scatter(beam_diff, across_slope, title = 'Depth bias to Roll Rate Slope vs Across Track Distance', fit = False)
+        # plot a single beam's roll rate vs bias to demonstrate where the regressed plots come from.
+        beam = 20
+        self._plot_wobble_scatter(rxrollvel[:,beam], bias_angle[:,beam], title = 'Regressing beam ' + str(beam) + ' Roll Velocity vs Angular Bias')
         print 'done!'
+        # np.savez('angles',across = across88[rem:-rem,:],lowpass = low_pass[rem:-rem,:])
 
-    def _plot_wobble_scatter(self, data1, data2, title = '', fit = True, txid = None):
+    def _plot_wobble_scatter(self, data1, data2, title = '', fit = True, mean = False, txid = None, residual = None):
         """
         Takes in two one dimensional record numpy arrays and plots them as
         a scatter plot.  A fit line can also be added.
         """
         plt.figure()
-        plt.plot(data1,data2,'b.')
         name1 = data1.dtype.names[0]
         name2 = data2.dtype.names[0]
+        if residual is None:
+            plt.plot(data1,data2,'b.')
+        else:
+            plt.errorbar(data1[name1], data2[name2], yerr = residual.astype('float'))
         plt.xlabel(name1)
         plt.ylabel(name2)
         plt.grid()
@@ -2660,6 +2894,27 @@ class useall(allRead):
                      plt.plot(xdata,ydata,'r-')
                      s = '%0.2e' %result[0]
                      title = title + ', txid ' + str(int(n)) + ' slope: ' + s
+        if mean:
+            result= np.polyfit(data1[name1], data2[name2],1)
+            linefunc = np.poly1d(result)
+            xmin = data1[name1].min()
+            xmax = data1[name1].max()
+            ymean = data2[name2].mean()
+            plt.hlines(ymean,xmin,xmax,colors = 'g')
+            s = 'Mean: %0.2e' %ymean
+            title = title + '\n' + s
+            if txid is not None:
+                # dealing with the beams that switch sectors
+                idx = np.nonzero(txid%1==0)[0]
+                txvals = set(txid[idx])
+                for n in txvals:
+                    idx = np.nonzero(txid == n)
+                    ymean = data2[name2][idx].mean()
+                    xmin = data1[name1][idx].min()
+                    xmax = data1[name1][idx].max()
+                    plt.hlines(ymean,xmin,xmax, colors = 'r')
+                    s = '%0.2e' %ymean
+                    title = title + ', txid ' + str(int(n)) + ' M: ' + s
         plt.title(title)
         plt.draw()
         
@@ -2784,6 +3039,9 @@ class useall(allRead):
                         detect = ping89.beaminfo['DetectionInfo']
                         idx = np.nonzero(detect > 127)[0]
                         samples[idx] = np.nan
+                        temp = np.zeros(numbeams)
+                        temp[:numvalid] = samples
+                        samples = temp
                 if not footprint or not lambertian:
                     ft, lb = self.km_backscatter_normalization(n)
                     if not footprint:
@@ -3015,27 +3273,29 @@ class useall(allRead):
             p66 = self.getrecord(66,noisetests[0][0])
             p66.parse()
             numchannels = len(p66.data.flatten())
-            p66 = self.getrecord(66,spectests[0][0])
-            p66.parse()
-            numfreqs = len(p66.data.flatten())
-            # Go through all tests and extract the noise data
             allnoise = np.zeros((numnoise,numchannels))
             allnoise[:,:] = np.nan
-            allspec = np.zeros((numspec,numfreqs))
+            if numspec > 0:
+                p66 = self.getrecord(66,spectests[0][0])
+                p66.parse()
+                numfreqs = len(p66.data.flatten())
+                allspec = np.zeros((numspec,numfreqs))
+                for n in range(numspec):
+                    p66 = self.getrecord(66,spectests[n][0])
+                    p66.parse()
+                    allspec[n,:] = p66.data.flatten()
+                freq = [str(x) for x in p66.freq]
+                c2max = allspec.max()
+                c2min = allspec.min()
+            # Go through all tests and extract the noise data
             for n in range(numnoise):
                 p66 = self.getrecord(66,noisetests[n][0])
                 p66.parse()
                 allnoise[n,:] = p66.data.flatten()
-            for n in range(numspec):
-                p66 = self.getrecord(66,spectests[n][0])
-                p66.parse()
-                allspec[n,:] = p66.data.flatten()
-            freq = [str(x) for x in p66.freq]
+
             # Find the color range for the plots
             cmax = allnoise.max()
             cmin = allnoise.min()
-            c2max = allspec.max()
-            c2min = allspec.min()
             # set up the xticks
             if xticklabels == []:
                 speed = self.getspeed(np.array(noisetests)[:,1])
@@ -3063,25 +3323,91 @@ class useall(allRead):
             ax.set_title(('All Noise Level Tests'))
             bar = fig.colorbar(c, ax=ax)
             bar.set_label('Noise Levels (dB)')
-            yspacing = numfreqs / len(freq)
-            yticks = range(yspacing/2, numfreqs, yspacing)
-            fig2 = plt.figure()
-            ax2 = fig2.add_subplot(111)
-            c2 = ax2.pcolormesh(allspec.T)
-            c2.set_clim((c2min,c2max))
-            ax2.set_ylabel('Frequency (kHz)')
-            ax2.set_ylim((0,allspec.shape[1]))
-            ax2.set_yticks([])
-            ax2.set_yticks(yticks)
-            ax2.set_yticklabels(freq)
-            ax2.set_xlim((0,allspec.shape[0]))
-            ax2.set_xticks([])
-            ax2.set_xticks(xticks)
-            ax2.set_xticklabels(xticklabels)
-            ax2.set_xlabel(xlabel)
-            ax2.set_title(('All Noise Spectrum Level Tests'))
-            bar2 = fig2.colorbar(c2, ax=ax2)
-            bar2.set_label('Noise Levels (dB)')            
+            if numspec > 0:
+                yspacing = numfreqs / len(freq)
+                yticks = range(yspacing/2, numfreqs, yspacing)
+                fig2 = plt.figure()
+                ax2 = fig2.add_subplot(111)
+                c2 = ax2.pcolormesh(allspec.T)
+                c2.set_clim((c2min,c2max))
+                ax2.set_ylabel('Frequency (kHz)')
+                ax2.set_ylim((0,allspec.shape[1]))
+                ax2.set_yticks([])
+                ax2.set_yticks(yticks)
+                ax2.set_yticklabels(freq)
+                ax2.set_xlim((0,allspec.shape[0]))
+                ax2.set_xticks([])
+                ax2.set_xticks(xticks)
+                ax2.set_xticklabels(xticklabels)
+                ax2.set_xlabel(xlabel)
+                ax2.set_title(('All Noise Spectrum Level Tests'))
+                bar2 = fig2.colorbar(c2, ax=ax2)
+                bar2.set_label('Noise Levels (dB)')
+                return allnoise.T, allspec.T, xticklabels, freq
+            else:
+                return allnoise.T, np.array([]), xticklabels, []
+            
+    def extract_passive_wc(self, badsamples = 20):
+        """
+        Builds an array of noise data by averaging the watercolumn from the
+        file. TVG is not removed from the water column backscatter because 
+        there is assumed to be no TVG in passive mode (confirmed by Kongsberg).
+        The speed and linear average noise by beam is returned. 
+        """
+        # there are some unfilled samples at the end of the array
+        print "***Warning: dropping the last " + str(badsamples) + " samples in range***"
+        speeds = []
+        noise = []
+    #    pingfft = []
+        totalsamples = 0
+        if not self.map.packdir.has_key('80'):
+            altfile = self.infilename[:-3] + 'all'
+            if os.path.isfile(altfile):
+                b = allRead(altfile)
+                b.mapfile()
+            else:
+                print 'No Speed source found'
+        else:
+            altfile = ''
+        if self.map.packdir.has_key('107'):
+            numwc = len(set(self.map.packdir['107'][:,3]))
+            for n in range(numwc):
+                subpack = self.getwatercolumn(n)
+                if len(altfile) == 0:
+                    speed = self.getspeed(self.packet.gettime())
+                else:
+                    speed = b.getspeed(self.packet.gettime())
+                if not np.isnan(speed):
+                    speeds.append(speed)
+                    if totalsamples == 0:
+                        totalsamples = subpack.ampdata.shape[0] - badsamples
+                    wc = subpack.ampdata[:totalsamples,:].astype(np.float64)
+                    wc = 10**(wc/10)
+                    noise.append(10 * np.log10(wc.mean(axis = 0)))
+        if len(altfile) != 0:
+            b.close()
+        # rearrange the data into arrays and by increasing speed
+        noise = np.asarray(noise).T
+        speeds = np.squeeze(np.asarray(speeds))
+        idx = np.argsort(speeds)
+        speeds = np.squeeze(speeds[idx])
+        noise = np.squeeze(noise[:,idx])
+        # go through each beam for the series and find the indices that are outside of 3std
+        raw_std = noise.std(axis = 1)
+        raw_mean = noise.mean(axis = 1)
+        raw_idx = []
+        for m in range(noise.shape[0]):
+            temp_idx = np.nonzero((noise[m,:] > raw_mean[m] + 3*raw_std[m])|(noise[m,:] < raw_mean[m] - 3*raw_std[m]))
+            if len(temp_idx) > 0:
+                for k in temp_idx[0]:
+                    raw_idx.append(k)
+        raw_bad_idx = np.array(list(set(raw_idx)))
+        filtered = np.delete(noise, raw_bad_idx, axis = 1)
+        # take the mean of the remaining data
+        lin_noise = 10**(filtered/10)
+        lin_mean_noise = lin_noise.mean(axis = 1)
+        mean_noise = np.squeeze(10 * np.log10(lin_mean_noise))
+        return speeds, noise, mean_noise
         
     def build_wc_h5(self):
         """
@@ -3200,6 +3526,7 @@ class mappack:
         """Constructor creates a packmap dictionary"""
         self.packdir = {}
         self.sizedir = {}
+        self.numwc = None
         self.dtypes = {
             68 : 'Old Depth',
             88 : 'New Depth',
@@ -3284,7 +3611,7 @@ class mappack:
             
     def save(self, outfilename):
         outfile = open(outfilename, 'wb')
-        # pickle.dump(self.packdir, outfile)
+        pickle.dump(self.__dict__, outfile)
         outfile.close()
         
     def gettype(self, dtype):
@@ -3296,7 +3623,7 @@ class mappack:
         
     def load(self,infilename):
         infile = open(infilename, 'rb')
-        # self.packdir = pickle.load(infile)
+        self.__dict__ = pickle.load(infile)
         infile.close()        
         
 class resolve_file_depths:
@@ -3646,6 +3973,7 @@ def build_BSCorr(fname1, fname2, which_swath = 0, bs_mean = None, plot_bs = True
     The selected pings are then stacked to look for the average in each sector
     and by beam.
     
+    -For the EM710-
     From Gard Skokland:
     The second line in the bscorr file is describing the swath
     The first number indicate which mode (very shallow, shallow etc.).
@@ -3657,6 +3985,9 @@ def build_BSCorr(fname1, fname2, which_swath = 0, bs_mean = None, plot_bs = True
     Maximum allowed inputs per sector is 32. 
     That gives 96 for the whole swath. Since the swath is maximum 70/70, total 140 degrees, you will then be able to have approxemately one correction input per 1.5 degree.
     This is a very time consuming job if you do it manually, but I think the deault 10 degrees is a little to big step.
+
+    -For the EM122-
+    ...
     """
     a = useall(fname1)
     b = useall(fname2)
@@ -3698,14 +4029,22 @@ def build_BSCorr(fname1, fname2, which_swath = 0, bs_mean = None, plot_bs = True
     if len(idx) == 1:
         bscorr_data = a51.data[idx[0]]
         bscorr_sectors = []
-        for n in range(anumsectors):
-            bscorr_sectors.append(bscorr_data[n])
+        if asonartype == 710:
+            for n in range(anumsectors):
+                bscorr_sectors.append(bscorr_data[n])
+        elif asonartype == 122:
+            bscorr_sectors = bscorr_data
     else:
         print "No match for settings found in BSCorr!!!"
     
     # get the backscatter for each line
     abp, acount, angles = a.build_BSCorr_info(which_swath = which_swath, plot_bs = plot_bs, lambertian = lambertian)
     bbp, bcount, angles = b.build_BSCorr_info(which_swath = which_swath, plot_bs = plot_bs, lambertian = lambertian)
+    
+    # dropping the data near nadir from the nomalization.  Kjell does something similar...
+    #idx = np.nonzero((angles < 15) & (angles > -15))
+    #abp[idx,:] = np.nan
+    #bbp[idx,:] = np.nan
     
     # find the average values as a difference from the mean
     abp_lin = 10**(abp/10)
@@ -3716,25 +4055,39 @@ def build_BSCorr(fname1, fname2, which_swath = 0, bs_mean = None, plot_bs = True
     print 'Normalizing backscatter to ' + str(bs_mean) 
     m,n = abp.shape
     bp_mean = np.zeros((m,n))
-    for r in range(m):
-        for s in range(n):
-            if np.isnan(abp[r,s]) & np.isnan(bbp[r,s]):
-                bp_mean[r,s] = np.nan
-            elif np.isnan(abp[r,s]):
-                bp_mean[r,s] = bbp[r,s]
-            elif np.isnan(bbp[r,s]):
-                bp_mean[r,s] = abp[r,s]
-            else:
-                bp_mean[r,s] = 10*np.log10((10**(abp[r,s]/10) + 10**(bbp[r,s]/10)) / 2)
+    for s in range(n):
+        if asonartype == 710:
+            for r in range(m):
+                if np.isnan(abp[r,s]) & np.isnan(bbp[r,s]):
+                    bp_mean[r,s] = np.nan
+                elif np.isnan(abp[r,s]):
+                    bp_mean[r,s] = bbp[r,s]
+                elif np.isnan(bbp[r,s]):
+                    bp_mean[r,s] = abp[r,s]
+                else:
+                    bp_mean[r,s] = 10*np.log10((10**(abp[r,s]/10) + 10**(bbp[r,s]/10)) / 2)
+        elif asonartype == 122:
+            idx = np.nonzero(~np.isnan(abp[:,s]))
+            abp_mean = np.nanmean(abp[:,s])
+            bbp_mean = np.nanmean(bbp[:,s])
+            bp_mean[:,s] = np.nan
+            bp_mean[idx,s] = (abp_mean + bbp_mean) / 2.
     bp_mean -= bs_mean
     
     # combine the BScorr file with the averaged output
     bscorr_interp = []
     for n in range(anumsectors):
-        temp = bscorr_sectors[n]
-        idx = temp[:,0].argsort() # angles are in reverse order in the BSCorr
-        temp = temp[idx,:]
-        bscorr_interp.append(np.interp(angles,temp[:,0],temp[:,1], left = np.nan, right = np.nan))
+        if asonartype == 710:
+            temp = bscorr_sectors[n]
+            idx = temp[:,0].argsort() # angles are in reverse order in the BSCorr
+            temp = temp[idx,:]
+            bscorr_interp.append(np.interp(angles,temp[:,0],temp[:,1], left = np.nan, right = np.nan))
+        elif asonartype == 122:
+            temp = bscorr_sectors[n]
+            idx = np.nonzero(~np.isnan(bp_mean[:,n]))
+            vals = np.zeros(len(bp_mean)) + np.nan
+            vals[idx] = int(temp[0])
+            bscorr_interp.append(vals)
     bscorr_interp = np.asarray(bscorr_interp).T
     
     # make the plot
@@ -3749,7 +4102,7 @@ def build_BSCorr(fname1, fname2, which_swath = 0, bs_mean = None, plot_bs = True
     plt.grid()
     ax2 = f1.add_subplot(412)
     ax2.plot(angles, bp_mean, 'g-+')
-    ax2.plot(angles, bscorr_interp, 'r-*')
+    ax2.plot(angles, (bscorr_interp - np.nanmean(bscorr_interp)) * 0.01, 'r-*')
     ax2.set_ylabel('File Mean and BSCorr\ndB re 1 $\mu$Pa at 1 meter')
     ax2.set_xlim((amax,amin))
     plt.grid()
@@ -3773,35 +4126,36 @@ def build_BSCorr(fname1, fname2, which_swath = 0, bs_mean = None, plot_bs = True
     #plt.tight_layout()
     plt.show()
     
-    # output text file
-    outname = fname1.split('_')[2] + '_' + fname2.split('_')[2] + '.bscorr'
-    outfile = open(outname,'w')
-    s = swath.split()[1]
-    metatitle = 'Mode,Number of Sectors,Sonar Type,Swath Type/Number,BS Mean\n'
-    metadata = str(mode) + "," + str(anumsectors) + "," + str(asonartype
-        ) + ',' + s + str(which_swath) + ',' + str(bs_mean) + '\n'
-    outfile.write(metatitle)
-    outfile.write(metadata)
-    
-    angletitle = ''
-    dataout = ['','','']
-    for n,a in enumerate(angles):
-        if a%5 == 0:
-            angletitle = angletitle + str(a) + ','
-            for m in range(anumsectors):
-                bs = bp_mean[n,m]
-                if np.isnan(bs) or np.isnan(bscorr_interp[n,m]):
-                    dataout[m] = dataout[m] + ','
-                else:
-                    dataout[m] = dataout[m] + str(bs + bscorr_interp[n,m]) + ','
-    angletitle = angletitle + '\n'
-    outfile.write(angletitle)
-    for m in range(anumsectors):
-        outfile.write(dataout[m] + '\n')
-    outfile.write('BSCorr\n')
-    outfile.close()
+    if asonartype == 710:
+        # output text file
+        outname = fname1.split('_')[2] + '_' + fname2.split('_')[2] + '.bscorr'
+        outfile = open(outname,'w')
+        s = swath.split()[1]
+        metatitle = 'Mode,Number of Sectors,Sonar Type,Swath Type/Number,BS Mean\n'
+        metadata = str(mode) + "," + str(anumsectors) + "," + str(asonartype
+            ) + ',' + s + str(which_swath) + ',' + str(bs_mean) + '\n'
+        outfile.write(metatitle)
+        outfile.write(metadata)
+        
+        angletitle = ''
+        dataout = ['','','']
+        for n,a in enumerate(angles):
+            if a%5 == 0:
+                angletitle = angletitle + str(a) + ','
+                for m in range(anumsectors):
+                    bs = bp_mean[n,m]
+                    if np.isnan(bs) or np.isnan(bscorr_interp[n,m]):
+                        dataout[m] = dataout[m] + ','
+                    else:
+                        dataout[m] = dataout[m] + str(bs + bscorr_interp[n,m]) + ','
+        angletitle = angletitle + '\n'
+        outfile.write(angletitle)
+        for m in range(anumsectors):
+            outfile.write(dataout[m] + '\n')
+        outfile.write('BSCorr\n')
+        outfile.close()
 
-def plot_extinction(fdir = '.', modes = []):
+def plot_extinction(fdir = '.', plot_mean = False, plot_lines = True, modes = []):
     """
     extinction_KM.py
     
@@ -3820,8 +4174,7 @@ def plot_extinction(fdir = '.', modes = []):
     infiles = []
     numxyz = []
     for f in range(numf):
-        infiles.append(allRead(flist[f]))
-        infiles[f].mapfile()
+        infiles.append(useall(flist[f]))
         if infiles[f].map.packdir.has_key('88'):
             numxyz.append(len(infiles[f].map.packdir['88']))
         else:
@@ -3863,6 +4216,9 @@ def plot_extinction(fdir = '.', modes = []):
     pd, pam = _build_extinction_curve(points[pidx,1],points[pidx,0])
     sd, sam = _build_extinction_curve(points[sidx,1],points[sidx,0])
     
+    # get the lines indicating the percentage of depth
+    lines, labels = _percent_depth_lines(points[:,1].max(), points[:,0].min(), points[:,0].max())    
+    
     plt.ion()
     
     if len(modes) == 0:
@@ -3873,12 +4229,25 @@ def plot_extinction(fdir = '.', modes = []):
     
     for m in marker:
         idx = np.nonzero(markers == m)[0]
-        ax.plot(points[idx,0], points[idx,1], linestyle = 'None', marker = 'o')
-    ax.plot(pam, pd, 'g', linewidth = 3)
-    ax.plot(sam, sd, 'g', linewidth = 3)
+        ax.plot(points[idx,0], points[idx,1], linestyle = 'None', marker = 'o',
+                edgecolor = 'none', label = modes[int(m)])
+    if plot_mean:
+        ax.plot(pam, pd, 'g', linewidth = 3)
+        ax.plot(sam, sd, 'g', linewidth = 3)
+    if plot_lines:
+        for n in range(len(lines)):
+            m = 0.9
+            ax.plot(lines[n,:,0],lines[n,:,1], 'k', alpha = 0.6)
+            ax.text(m*lines[n,1,0],m*lines[n,1,1], labels[n], size = 14, 
+                horizontalalignment='center', verticalalignment='center', 
+                bbox=dict(facecolor='white', edgecolor = 'none', alpha=0.5))
+            ax.plot(-lines[n,:,0],lines[n,:,1], 'k', alpha = 0.6)
+            ax.text(m*-lines[n,1,0],m*lines[n,1,1], labels[n], size = 14, 
+                horizontalalignment='center', verticalalignment='center',
+                bbox=dict(facecolor='white', edgecolor = 'none', alpha=0.5))
     ax.set_xlabel('Across Track (m)')
     ax.set_ylabel('Depth (m)')
-    plt.legend(modes, loc = 'center')
+    plt.legend(loc = 'center')
     plt.grid(True)
     ax.set_title('Extinction Depth Test')
     
@@ -3892,8 +4261,29 @@ def plot_extinction(fdir = '.', modes = []):
     
     plt.draw()
     
-    return pam,pd,sam,sd
+    # return pam,pd,sam,sd
     
+def _percent_depth_lines(maxdepth, minx, maxx):
+    """
+    Returns the lines for plotting the percent depth based on the depth and
+    min/max across track distaces provided.
+    """
+    if np.abs(minx) > maxx:
+        xmax = np.abs(minx)
+    else:
+        xmax = maxx
+    lines = np.zeros((7,2,2))
+    labels = []
+    for n in range(len(lines)):
+        x = maxdepth * (n+1) / 2.
+        if x < xmax:
+            lines[n,1,:] = [x,maxdepth]
+            labels.append(str(n+1) + 'X')
+        else:
+            lines[n,1,:] = [xmax, xmax * maxdepth / x]
+            labels.append(str(n+1) + 'X')
+    return lines, labels
+            
 def _build_extinction_curve(depths, across, binsize = 200):
     """
     This method takes a bunch of series of points, defined as depth and
@@ -3932,8 +4322,6 @@ def _build_extinction_curve(depths, across, binsize = 200):
         winvals = np.interp(dvals, depthwin, win) # build window values at the right places
         am.append( np.sum(avals * winvals) / winvals.sum() ) # window and normalize
     return depthstep, am
-            
-            
     
 def noise_from_passive_wc(path, speed_change_rate = 10, speed_bins = [], extension = 'wcd'):
     """
@@ -3959,11 +4347,24 @@ def noise_from_passive_wc(path, speed_change_rate = 10, speed_bins = [], extensi
         print 'Working on file ' + fname
         a = allRead(f)
         a.mapfile()
+        if not a.map.packdir.has_key('80'):
+            altfile = f[:-3] + 'all'
+            if os.path.isfile(altfile):
+                b = allRead(altfile)
+                b.mapfile()
+            else:
+                print 'No Speed source found for ' + fname
+                break
+        else:
+            altfile = ''
         if a.map.packdir.has_key('107'):
-            numwc = len(set(a.map.packdir['107'][:,2]))
+            numwc = len(set(a.map.packdir['107'][:,3]))
             for n in range(numwc):
                 subpack = a.getwatercolumn(n)
-                speed = a.getspeed(a.packet.gettime())
+                if len(altfile) == 0:
+                    speed = a.getspeed(a.packet.gettime())
+                else:
+                    speed = b.getspeed(a.packet.gettime())
                 if not np.isnan(speed):
                     speeds.append(speed)
                     if totalsamples == 0:
@@ -3975,6 +4376,8 @@ def noise_from_passive_wc(path, speed_change_rate = 10, speed_bins = [], extensi
                     # pingfft.append(wc_fft.real)#np.squeeze(wc_fft.mean(axis = 1).real))
                 
         a.close()
+        if len(altfile) >0:
+            b.close()
 #    freq = np.fft.rfftfreq(wc.shape[0],1/subpack.header['SamplingFrequency'])
     # rearrange the data into arrays and by increasing speed
     noise = np.asarray(noise).T
@@ -3987,7 +4390,7 @@ def noise_from_passive_wc(path, speed_change_rate = 10, speed_bins = [], extensi
     if len(speed_bins) == 0:
         idx, avespeeds = _find_speed_bins(speeds, scr)#, plotfig = True)
     else:
-        pass
+        idx, avespeeds = _assign_speed_bins(speeds, speed_bins)
     numspeeds = len(avespeeds)
     mean_noise = np.zeros((noise.shape[0],numspeeds))
 #    avg_fft = np.zeros((pingfft.shape[0],numspeeds))
@@ -4023,8 +4426,8 @@ def noise_from_passive_wc(path, speed_change_rate = 10, speed_bins = [], extensi
     bar = plt.colorbar()
     bar.set_label('Pressure (dB re $1\mu Pa$ at 1 meter)')
     plt.ylabel('Beam Number')
-    plt.xlabel('Speed')
-    plt.title('Noise Tests')
+    plt.xlabel('Speed (m/s)')
+    plt.title('Passive Mode Noise Tests')
     ax = im.get_axes()
     ax.set_xticks(tickloc)
     ax.set_xticklabels(speed_legend)
@@ -4057,7 +4460,6 @@ def noise_from_passive_wc(path, speed_change_rate = 10, speed_bins = [], extensi
 #    plt.xlim([0,mean_noise.shape[0]])
 #    plt.title('stuff')
 #    plt.grid()
-    return 
         
 def _find_speed_bins(speeds, speed_change_rate = 10, plotfig = False):
     """
@@ -4138,6 +4540,22 @@ def _find_speed_bins(speeds, speed_change_rate = 10, plotfig = False):
     # elif len(diffidx) > 0:
         # print 'no data to plot for speeds'
     return np.array(zip(start_idx,end_idx)), ave_speeds
+    
+def _assign_speed_bins(speeds, speed_bins, diff_from_bin = 0.5):
+    """
+    Takes speeds and the bins and returns the index for the ranges of each.
+    diff_from_bin is used to decide how far off the center of the bin that a
+    speed can be grouped into.
+    """
+    sb_idx = []
+    used_speeds = []
+    for sb in speed_bins:
+        idxs = np.nonzero((speeds < sb + diff_from_bin) & (speeds > sb - diff_from_bin))[0]
+        if len(idxs) > 0:
+            sb_idx.append([idxs[0],idxs[-1]+1])
+            used_speeds.append(sb)
+    # find the indicies where accelerations were lower.
+    return np.array(sb_idx), used_speeds
        
 def main():        
     if len(sys.argv) > 1:
