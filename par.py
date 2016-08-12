@@ -25,7 +25,7 @@ OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
 ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 
-V0.3.4 20160418
+V0.3.5 20160812
 This module includes a number of different classes and methods for working with
 Kongsberg all files, each of which are intended to serve at least one of three
 purposes.  These are
@@ -1219,6 +1219,26 @@ class Data51:
                         k += 1
                     self.data.append(data)
                 m += 1
+
+    def plot_BSCorr(self, mode_number):
+        """
+        This is a hack to quickly display BSCorr files.  The mode number to
+        to provide to this method is an integer, starting at 0, that
+        conrrisponds to the mode in the BSCorr file.  Print the this object's
+        'names' variable to see the order they are stored in.
+        """
+        if self.header[-1] == 6:
+            data = self.data[mode_number]
+            numswaths = len(data)
+            fig, ax = plt.subplots()
+            for n in range(numswaths):
+                ax.plot(data[n][:,0],data[n][:,1], 'o:')
+            r = ax.get_xlim()
+            ax.set_xlim((max(r),min(r)))
+            ax.set_xlabel('Beam Angle (deg, negative is to STBD)')
+            ax.set_ylabel('BS Adjustment (dB)')
+            ax.set_title('BSCorr: ' + self.names[mode_number])
+            ax.grid()
     
     def display(self):
         """
