@@ -1,7 +1,28 @@
 """
 par.py
 G.Rice 6/20/2012
-V0.3.2 201603218
+
+Copyright (c) 2016 Glen Rice
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+V0.3.3 20160418
 
 This module includes a number of different classes and methods for working with
 Kongsberg all files, each of which are intended to serve at least one of three
@@ -103,11 +124,20 @@ class allRead:
         self.filelen = self.infile.tell()
         self.infile.seek(0)
         
-    def close(self):
+    def close(self, clean = False):
         """
         Close the file from which the data is being read.
         """
         self.infile.close()
+        if clean:
+            mapfilename = self.infilename[:-3] + 'par'
+            navfilename = self.infilename[:-3] + 'nav'
+            try:
+                os.remove(mapfilename)
+                os.remove(navfilename)
+            except:
+                pass
+            
         
     def read(self):
         """
@@ -458,6 +488,20 @@ class allRead:
                     pitchrate += list(pav.source_data['PitchRate'])
                     yawrate += list(pav.source_data['YawRate'])
                     downvel += list(pav.source_data['DownVelocity'])
+            elif pav.source == 'binary11':
+                for m in range(numatt):
+                    pav = self.getrecord(110, m)
+                    if pav.source == 'binary11':
+                        time += list(pav.data['Time'])
+                        roll += list(pav.data['Roll'])
+                        pitch += list(pav.data['Pitch'])
+                        heave += list(pav.data['Heave'])
+                        heading += list(pav.data['Heading'])
+                        exttime += list(pav.source_data['Seconds'] + pav.source_data['FracSeconds'])
+                        rollrate += list(pav.source_data['RollRate'])
+                        pitchrate += list(pav.source_data['PitchRate'])
+                        yawrate += list(pav.source_data['YawRate'])
+                        downvel += list(pav.source_data['DownVelocity'])
             self.navarray['110'] = np.asarray(zip(time,roll,pitch,heave,heading,exttime,rollrate,pitchrate,yawrate,downvel))
         if self.map.packdir.has_key('104'):
             print 'creating altitude (depth) array'
@@ -492,6 +536,7 @@ class allRead:
             navfile = open(self.infilename[:-3] + 'nav','rb')
             self.navarray = pickle.load(navfile)
             print "Loaded navarray from " + self.infilename[:-3] + "nav."
+            navfile.close()
         except:
             print "No navarray file found."
             
@@ -1634,7 +1679,7 @@ class Data79:
     """
     Quality factor datagram 4fh / 79d / 'O'.
     """
-    hdr_dtype = np.dtype([('PingCounter','H'),('SystemSerial#','H'),
+    hdr_dtype = np.dtype([('Counter','H'),('SystemSerial#','H'),
         ('Nrx','H'),('Npar','H')]) # The data format has a Spare Byte here...
     qf_dtype = np.dtype([('QualityFactor','f4')])
     
@@ -1992,7 +2037,7 @@ class Data89:
     Seabed Image datagram 059h / 89d / 'Y'.
     """
     
-    hdr_dtype = np.dtype([('PingCount','H'),('SystemSerial#','H'),
+    hdr_dtype = np.dtype([('Counter','H'),('SystemSerial#','H'),
         ('SamplingFreq','f'),('RangeToNormal','H'),('NormalBackscatter',"f"),
         ('ObliqueBackscatter',"f"),('TXBeamWidth',"f"),('TVGCrossover',"f"),
         ('NumberValidBeams','H')])
@@ -2429,7 +2474,7 @@ class Data110:
         read_dtype = np.dtype([('Proc', att_file_dtype),('Raw', raw_data_dtype)])
         temp = np.frombuffer(datablock[:self.numrecords * read_dtype.itemsize], dtype = read_dtype)
         self.data = temp['Proc'].astype(Data110.att_dtype)
-        raw_data = self._parse_raw(temp['Raw'])
+        self._parse_raw(temp['Raw'])
         # self.data = np.zeros(self.numrecords, dtype = att_file_dtype)
         # datap = 0
         # for i in range(self.numrecords):
@@ -2509,6 +2554,40 @@ class Data110:
             self.source_data['PitchRate']  = 90. / 2**14 * temp['PitchRate'].astype(np.float32)
             self.source_data['YawRate']  = 90. / 2**14 * temp['YawRate'].astype(np.float32)
             self.source = 'binary23'
+        elif raw_data[0][0][0] == 'q' and len(raw_data[0][0]) == 42:
+            source_dtype = np.dtype([('Header','S1'),
+                ('Seconds','>i'),('FracSeconds','>B'),('Latitude','>i'),
+                ('Longitude','>i'),('Height','>i'),('Heave','>h'),
+                ('NorthVelocity','>h'),('EastVelocity','>h'),
+                ('DownVelocity','>h'),('Roll','>h'),('Pitch','>h'),
+                ('Heading','>H'),('RollRate','>h'),('PitchRate','>h'),
+                ('YawRate','>h'),('StatusWord','>H'),('CheckSum','>H')])
+            source_usetype = np.dtype([('Header','S1'),
+                ('Seconds','i'),('FracSeconds','f'),('Latitude','f'),
+                ('Longitude','f'),('Height','f'),('Heave','f'),
+                ('NorthVelocity','f'),('EastVelocity','f'),
+                ('DownVelocity','f'),('Roll','f'),('Pitch','f'),
+                ('Heading','f'),('RollRate','f'),('PitchRate','f'),
+                ('YawRate','f'),('StatusWord','H'),('CheckSum','H')])
+            temp = np.fromiter(raw_data, dtype = source_dtype, count = self.numrecords)
+            self.source_data = np.zeros(len(temp), dtype = source_usetype)
+            self.source_data['Header'] = temp['Header']
+            self.source_data['Seconds'] = temp['Seconds']
+            self.source_data['FracSeconds'] = 0.01 * temp['FracSeconds'].astype(np.float32)
+            self.source_data['Latitude'] = 90. / 2**30 * temp['Latitude'].astype(np.float32)
+            self.source_data['Longitude'] = 90. / 2**30 * temp['Longitude'].astype(np.float32)
+            self.source_data['Height'] = 0.01 * temp['Height'].astype(np.float32)
+            self.source_data['Heave'] = 0.01 * temp['Heave'].astype(np.float32)
+            self.source_data['NorthVelocity'] = 0.01 * temp['NorthVelocity'].astype(np.float32)
+            self.source_data['EastVelocity'] = 0.01 * temp['EastVelocity'].astype(np.float32)
+            self.source_data['DownVelocity'] = 0.01 * temp['DownVelocity'].astype(np.float32)
+            self.source_data['Roll'] = 90. / 2**14 * temp['Roll'].astype(np.float32)
+            self.source_data['Pitch']  = 90. / 2**14 * temp['Pitch'].astype(np.float32)
+            self.source_data['Heading'] = 90. / 2**14 * temp['Heading'].astype(np.float32)
+            self.source_data['RollRate']  = 90. / 2**14 * temp['RollRate'].astype(np.float32)
+            self.source_data['PitchRate']  = 90. / 2**14 * temp['PitchRate'].astype(np.float32)
+            self.source_data['YawRate']  = 90. / 2**14 * temp['YawRate'].astype(np.float32)
+            self.source = 'binary11'
         else:
             self.source_data = raw_data
             self.source = 'Unknown'
@@ -3964,7 +4043,7 @@ class resolve_file_depths:
         plt.suptitle(('xyz - resolved for record ' + str(recordnum)))
         plt.draw()
 
-def build_BSCorr(fname1, fname2, which_swath = 0, bs_mean = None, plot_bs = True, lambertian = True):
+def build_BSCorr(fname1, fname2, which_swath = 0, bs_mean = None, plot_bs = True, lambertian = True, debug = False):
     """
     This function is intended to build a BSCorr.txt file for a Kongsberg
     multibeam that has a compatable version of SIS (4.1.x and later,
@@ -4154,6 +4233,7 @@ def build_BSCorr(fname1, fname2, which_swath = 0, bs_mean = None, plot_bs = True
             outfile.write(dataout[m] + '\n')
         outfile.write('BSCorr\n')
         outfile.close()
+    assert(not debug)
 
 def plot_extinction(fdir = '.', plot_mean = False, plot_lines = True, modes = []):
     """
@@ -4229,8 +4309,8 @@ def plot_extinction(fdir = '.', plot_mean = False, plot_lines = True, modes = []
     
     for m in marker:
         idx = np.nonzero(markers == m)[0]
-        ax.plot(points[idx,0], points[idx,1], linestyle = 'None', marker = 'o',
-                edgecolor = 'none', label = modes[int(m)])
+        ax.plot(points[idx,0], points[idx,1], linestyle = 'None', marker = 'o', 
+                label = modes[int(m)])
     if plot_mean:
         ax.plot(pam, pd, 'g', linewidth = 3)
         ax.plot(sam, sd, 'g', linewidth = 3)
