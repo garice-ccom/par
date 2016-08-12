@@ -2,31 +2,27 @@
 par.py
 G.Rice 6/20/2012
 
-This is free and unencumbered software released into the public domain.
+Copyright (c) 2016 Glen Rice
 
-Anyone is free to copy, modify, publish, use, compile, sell, or
-distribute this software, either in source code form or as a compiled
-binary, for any purpose, commercial or non-commercial, and by any
-means.
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
 
-In jurisdictions that recognize copyright laws, the author or authors
-of this software dedicate any and all copyright interest in the
-software to the public domain. We make this dedication for the benefit
-of the public at large and to the detriment of our heirs and
-successors. We intend this dedication to be an overt act of
-relinquishment in perpetuity of all present and future rights to this
-software under copyright law.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
-OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
-ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
-OTHER DEALINGS IN THE SOFTWARE.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
-
-V0.3.4 20160418
+V0.3.3 20160418
 
 This module includes a number of different classes and methods for working with
 Kongsberg all files, each of which are intended to serve at least one of three
@@ -173,7 +169,10 @@ class allRead:
         not decoded.  If excecuted the packet_read flag is set to False.
         """
         if self.packet_read and not self.packet.decoded:
-            self.packet.decode()
+            try:
+                self.packet.decode()
+            except NotImplementedError as err:
+                print(err.message)
             self.packet_read = False
         
     def mapfile(self, verbose = False):
@@ -223,12 +222,12 @@ class allRead:
         Loads the packdir if the map object packdir has been saved previously.
         """
         if mapfilename == '':
-            mapfilename = self.infilename[:-3] + 'par'
+            mapfilename = self.infilename + '.par'
         try:
             self.map = mappack()
             self.map.load(mapfilename)
             self.mapped = True
-            print 'loaded file map ' + mapfilename
+            print 'Loaded file map ' + mapfilename
         except IOError:
             print mapfilename + ' map file not found.'
             
@@ -239,7 +238,7 @@ class allRead:
         but with a 'par' extension.
         """
         if self.mapped:
-            mapfilename = self.infilename[:-3] + 'par'
+            mapfilename = self.infilename + '.par'
             self.map.save(mapfilename)
             print 'file map saved to ' + mapfilename
         else:
@@ -524,10 +523,11 @@ class allRead:
         if not self.__dict__.has_key('navarray'):
             self._build_navarray()
         try:
-            navfile = open(self.infilename[:-3] + 'nav','wb')
+            navfilename = self.infilename + '.nav'
+            navfile = open(navfilename,'wb')
             pickle.dump(self.navarray, navfile)
             navfile.close()
-            print "Saved navarray to " + self.infilename[:-3] + 'nav'
+            print "Saved navarray to " + navfilename
         except:
             pass
         
@@ -537,9 +537,10 @@ class allRead:
         navigation array for this file name.
         """
         try:
-            navfile = open(self.infilename[:-3] + 'nav','rb')
+            navfilename = self.infilename + '.nav'
+            navfile = open(navfilename,'rb')
             self.navarray = pickle.load(navfile)
-            print "Loaded navarray from " + self.infilename[:-3] + "nav."
+            print "Loaded navarray from " + navfilename
             navfile.close()
         except:
             print "No navarray file found."
@@ -758,7 +759,7 @@ class allRead:
             elif self.map.packdir.has_key('68'):
                 n = '68'
             else:
-                n == None
+                n = None
             if n is not None:
                 b = np.isclose([self.map.packdir['88'][:,1]],[pingtime], rtol = 0, atol = 5e-4)
                 idx = np.nonzero(b)[0]
@@ -860,6 +861,10 @@ class Datagram:
         else:
             self.valid = False
         self.datablock = fileblock[hdr_sz:-3]
+        # Storing data skipped in datablock
+        self.datablockheader =  fileblock[:hdr_sz]
+        self.datablockfooter = fileblock[-3:]
+        
         etx = np.frombuffer(fileblock[-3:-2], dtype=np.uint8, count=1)[0]
         if etx != 3:
             self.valid = False
@@ -872,6 +877,9 @@ class Datagram:
             self.maketime()
         except ValueError:
             pass
+        
+    def rawdatablock(self):
+        return self.datablockheader + self.datablock + self.datablockfooter
         
     def decode(self):
         """
@@ -925,7 +933,7 @@ class Datagram:
         elif self.dtype == 110:
             self.subpack = Data110(self.datablock, self.time, self.byteswap)
         else:
-            print "Data record " + str(self.dtype) + " decoding is not yet supported."
+            raise NotImplementedError("Data record " + str(self.dtype) + " decoding is not yet supported.")
         self.decoded = True
 
     def maketime(self):
@@ -955,6 +963,17 @@ class Datagram:
         """
         for n,name in enumerate(self.header.dtype.names):
             print name + ' : ' + str(self.header[n])
+
+
+class Data(object):
+    """
+    Displays contents of the header to the command window.
+    """
+    def display(self):
+        header = np.zeros(0)
+        for n, name in enumerate(self.header.dtype.names):
+            print name + ' : ' + str(self.header[n])
+
 
 class Data48:
     """
@@ -1612,7 +1631,7 @@ class Data78:
     """
     Raw range and angle datagram, aka 'N'/'4eh'/78d.  All data is contained
     in the header, rx, and tx arrays. the rx and tx arrays are ordered as in
-    the data defintion document, but have been converted to degrees, dB,
+    the data definition document, but have been converted to degrees, dB,
     meters, etc.
     The reported angles are in the transducer reference frame, so be careful of
     reverse mounted configurations. For the TX, forward angles are positive, 
@@ -1621,7 +1640,7 @@ class Data78:
     
     hdr_dtype = np.dtype([('Counter','H'),('Serial#','H'),('SoundSpeed','f'),
         ('Ntx','H'),('Nrx','H'),('Nvalid','H'),('SampleRate','f'),('Dscale','I')])
-    ntx_dtype = np.dtype([('TiltAngle','f'),('Focusing','f'),('Pulse','f'),('Delay','f'),
+    ntx_dtype = np.dtype([('TiltAngle','f'),('Focusing','f'),('SignalLength','f'),('Delay','f'),
         ('Frequency','f'),('AbsorptionCoef','f'),('WaveformID','B'),
         ('TransmitSector#','B'),('Bandwidth','f')])
     nrx_dtype = np.dtype([('BeamPointingAngle','f'),('TransmitSectorID','B'),('DetectionInfo','B'),
@@ -1642,7 +1661,7 @@ class Data78:
 
     def read(self, datablock):
         """Decodes the repeating parts of the record."""
-        ntx_file_dtype = np.dtype([('TiltAngle','h'),('Focusing','H'),('Pulse','f'),('Delay','f'),
+        ntx_file_dtype = np.dtype([('TiltAngle','h'),('Focusing','H'),('SignalLength','f'),('Delay','f'),
             ('Frequency','f'),('AbsorptionCoef','H'),('WaveformID','B'),
             ('TransmitSector#','B'),('Bandwidth','f')])
         ntx_file_sz = ntx_file_dtype.itemsize
@@ -2051,7 +2070,7 @@ class Data89:
     def __init__(self, datablock, byteswap = False):
         """Catches the binary datablock and decodes the first section and calls
         the decoder for the rest of the record."""
-        hdr_dtype = np.dtype([('PingCount','H'),('SystemSerial#','H'),
+        hdr_dtype = np.dtype([('Counter','H'),('SystemSerial#','H'),
             ('SamplingFreq','f'),('RangeToNormal','H'),('NormalBackscatter',"h"),
             ('ObliqueBackscatter',"h"),('TXBeamWidth',"H"),('TVGCrossover',"H"),
             ('NumberValidBeams','H')])
@@ -2285,7 +2304,7 @@ class Data107:
         
     def read(self, datablock):
         """
-        Reads the varable section of the datagram.
+        Reads the variable section of the datagram.
         """
         # declare tx stuff
         ntx_dtype = np.dtype([('TiltTx',"h"),('CenterFrequency',"H"),
@@ -2610,14 +2629,13 @@ class useall(allRead):
     """
     def __init__(self, infilename, reload_map = True, verbose = False, byteswap = False):
         allRead.__init__(self,infilename,verbose,byteswap)
-        fname, ftype = infilename.rsplit('.',1)
-        if reload_map and os.path.exists(fname + '.par'):
+        if reload_map and os.path.exists(infilename + '.par'):
             self.loadfilemap()
         else:
             self.mapfile()
             self.savefilemap()
         
-        if reload_map and os.path.exists(fname + '.nav'):
+        if reload_map and os.path.exists(infilename + '.nav'):
             self.load_navarray()
         else:
             self._build_navarray(allrecords = True)
@@ -3056,7 +3074,7 @@ class useall(allRead):
             sr = ping78.header['SampleRate']
             r = ping78.rx['TravelTime']
             txid = ping78.rx['TransmitSectorID']
-            pulse = ping78.tx['Pulse']
+            pulse = ping78.tx['SignalLength']
             txnum = ping78.tx['TransmitSector#'].sort()
             c = ping78.header['SoundSpeed']
             depths = subpacks['88'].data['Depth']
