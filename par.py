@@ -25,7 +25,7 @@ OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
 ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 
-V0.3.5 20160812
+V0.3.6 20161018
 This module includes a number of different classes and methods for working with
 Kongsberg all files, each of which are intended to serve at least one of three
 purposes.  These are
@@ -1531,7 +1531,6 @@ class Data67:
         for n,name in enumerate(self.header.dtype.names):
             print name + ' : ' + str(self.header[n])
         
-        
 class Data68:
     """
     XYZ datagram 044h / 68d / 'D'. All values are converted to meters, degrees,
@@ -1724,6 +1723,9 @@ class Data78:
         """
         txnum = self.tx['TransmitSector#']
         txnum.sort()
+        # deal with EM2040 in 200 kHz where the tx sector idx are [0,2]
+        if txnum.max() == len(txnum):
+            txnum[-1] = txnum[-1] - 1
         txdelays = self.tx['Delay'][txnum]
         rxdelays = txdelays[self.rx['TransmitSectorID']].astype(np.float64)
         rxtime = self.rx['TravelTime'].astype(np.float64) + rxdelays + self.pingtime
@@ -1809,13 +1811,27 @@ class Data80:
         """
         Parses the raw_data that arrived in SIS and puts it in source_data.
         """
+        msg_type = np.frombuffer(self.raw_data[:5], dtype = 'S5')
+        if msg_type == 'INGGA':
+            self._parse_gga()
+        elif msg_type == 'GPGGA':
+            self._parse_gga()
+        elif msg_type == 'INGGK':
+            self._parse_ggk()
+        elif msg_type == 'GPGGK':
+            self._parse_ggk()
+            
+    def _parse_gga(self):
+        """
+        parse the gga string.
+        """
         gga_dtype = np.dtype([('MessageID','S5'),('POSIX','d'),
             ('Latitude','f'),('LatDirection','S1'),('Longitude','f'),
             ('LonDirection','S1'),('GPSQuality','B'),('#SV','B'),('HDOP','f'),
             ('OrthometricHeight','f'),('HeightUnits','S1'),('GeoidSeparation','f'),
             ('SeparationUnits','S1'),('AgeOfDGPS','f'),('ReferenceStationID','H'),
             ('CheckSum','H')])
-
+            
         self.source_data = np.zeros(1, dtype = gga_dtype)[0]
         temp = self.raw_data.split(',')
         for n,t in enumerate(temp):
@@ -1835,6 +1851,42 @@ class Data80:
                 elif n == 14:
                     t2 = t.split('*')
                     self.source_data[-2] = int(t2[0])
+                    self.source_data[-1] = int(t2[1],16)
+                else:
+                    self.source_data[n] = int(t)
+            else:
+                self.source_data[n] = None
+                
+    def _parse_ggk(self):
+        """
+        parse the ggk string.
+        """
+        ggk_dtype = np.dtype([('MessageID','S5'),('UTCTime','d'),('UTCDay','S6'),
+            ('Latitude','f'),('LatDirection','S1'),('Longitude','f'),
+            ('LonDirection','S1'),('GPSQuality','B'),('#SV','B'),('DOP','f'),
+            ('EllipsoidHeight','f'),('HeightUnits','S1'),('CheckSum','H')])
+            
+        self.source_data = np.zeros(1, dtype = ggk_dtype)[0]
+        temp = self.raw_data.split(',')
+        for n,t in enumerate(temp):
+            if len(t) > 0:
+                if n == 0 or n == 2 or n == 4 or n == 6:
+                    self.source_data[n] = t
+                elif n == 1 or n == 9:
+                    self.source_data[n] = float(t)
+                elif n == 3:
+                    deg = int(t[:2])
+                    min = float(t[2:])
+                    self.source_data[n] = deg + min/60.
+                elif n == 5:
+                    deg = int(t[:3])
+                    min = float(t[3:])
+                    self.source_data[n] = deg + min/60.
+                elif n == 10:
+                    self.source_data[n] = float(t[3:])
+                elif n == 11:
+                    t2 = t.split('*')
+                    self.source_data[-2] = t2[0]
                     self.source_data[-1] = int(t2[1],16)
                 else:
                     self.source_data[n] = int(t)
@@ -2710,8 +2762,79 @@ class useall(allRead):
             return False
         else:
             return True
+            
+    def get_stats(self, display = True):
+        """
+        Get the basic statistics for the line including:
+        Line name
+        EM model
+        Mode flags
+        Dual swath
+        Yaw and Pitch Stabilzation flags
+        Max angular coverage setting for port / starboard
+        Detection mode which is found in FilterID2
+        External trigger which if found in the ProcessingUnitStatus
+        Speed mean and standard deviation
+        Heading mean and standard deviation
+        Roll standard deviation
+        Pitch standard deviation
+        Heave standard deviation
+        Start and end times
+        Latitude minimum and maximum
+        Longitude minimum and maximum
+        Center beam depth mean and standard deviation
         
-    def plot_wobbles(self, which_swath = 0, heavefile = None):
+        """
+        stat_dtype = np.dtype([
+            ('Filename','S27'),
+            ('EMModel','<u2'),
+            ('Mode','S8'),
+            ('DualSwath','b'),
+            ('YawAndPitchStabilization','S8'),
+            ('AngularLimits','<u2',2),
+            ('FilterID2','S8'),
+            ('ProcessingUnitStatus','S8'),
+            ('Speed','f',2),
+            ('Heading','f',2),
+            ('Roll','f'),
+            ('Pitch','f'),
+            ('Heave','f'),
+            ('Times','d',2),
+            ('Latitude','f',2),
+            ('Longitude','f',2),
+            ('Depth','f',2)])
+        info = np.zeros(1, dtype = stat_dtype)[0]
+        info['Filename'] = self.infilename[:27]
+        p = self.getrecord(82, 0)
+        info['EMModel'] = self.packet.header['Model']
+        info['Mode'] = np.binary_repr(p.header['Mode'])
+        info['DualSwath'] = self.is_dual_swath()
+        info['YawAndPitchStabilization'] = np.binary_repr(p.header['YawAndPitchStabilization'])
+        info['AngularLimits'] = np.array([p.header['MaxPortCoverage'],p.header['MaxStarboardCoverage']], dtype = 'u2')
+        info['FilterID2'] = np.binary_repr(p.header['HiLoFrequencyAbsorptionCoeffRatio'])
+        info['ProcessingUnitStatus'] = np.binary_repr(p.header['ProcessingUnitStatus'])
+        self._build_speed_array()
+        info['Speed'] = np.array([np.nanmean(self.speedarray[:,1]),np.nanstd(self.speedarray[:,1])])
+        att = self.navarray['65']
+        info['Heading'] = np.array([att[:,-1].mean(), att[:,-1].std()])
+        info['Roll'] = att[:,1].std()
+        info['Pitch'] = att[:,2].std()
+        info['Heave'] = att[:,3].std()
+        info['Times'] = np.array([att[0,0],att[-1,0]])
+        nav = self.navarray['80']
+        info['Latitude'] = np.array([nav[:,2].min(),nav[:,2].max()])
+        info['Longitude'] = np.array([nav[:,1].min(),nav[:,1].max()])
+        depths = self.build_bathymetry()
+        numpings, numbeams = depths[:,:,0].shape
+        centerbeam = int(numbeams/2)
+        centerdata = depths[:,centerbeam,0]
+        info['Depth'] = np.array([centerdata.mean(),centerdata.std()])
+        if display:
+            for n,name in enumerate(info.dtype.names):
+                print name + ' : ' + str(info[n])
+        return info
+        
+    def plot_wobbles(self, which_swath = 0, heavefile = None, use_height = False):
         """
         Based on the paper
         JE Hughes Clarke, Dynamic Motion Residuals in Swath Sonar Data: Ironing
@@ -2749,15 +2872,6 @@ class useall(allRead):
         rxtime = np.zeros((numrec,numrx))
         rxroll = np.zeros((numrec,numrx))
         rxrollvel = np.zeros((numrec,numrx))
-        
-        # get the depth, along track and heave data
-        k = which_swath
-        for n in range(numrec):
-            p88 = self.getrecord(88,k)
-            txheave[n] = p88.header['TransmitDepth'] + wline
-            depth88[n,:] = p88.data['Depth'] + txheave[n]
-            across88[n,:] = p88.data['AcrossTrack']
-            k += step
             
         # get the 78 record for rx times and sector numbers
         k = which_swath
@@ -2777,10 +2891,29 @@ class useall(allRead):
             txdelay = p78.tx['Delay'].astype(np.float64)
             txtime[n,:] = p78.pingtime + txdelay
             k += step
+            
+        # get the height data if available
+        if self.navarray.has_key('104'):
+            rawheight = self.navarray['104']
+            
+        # get the depth, along track and heave data
+        k = which_swath
+        for n in range(numrec):
+            p88 = self.getrecord(88,k)
+            if use_height and self.navarray.has_key('104'):
+                # using the txtime from the first sector for heave!!!
+                height = np.interp(txtime[n,0], rawheight[:,0], rawheight[:,1], left = np.nan, right = np.nan)
+                depth88[n,:] = p88.data['Depth'] - height
+            else:
+                txheave[n] = p88.header['TransmitDepth'] + wline
+                depth88[n,:] = p88.data['Depth'] + txheave[n]
+                
+            across88[n,:] = p88.data['AcrossTrack']
+            k += step
         
         # get the true heave from a numpy array file with columns [time,realtime,delayed]
         dh = np.zeros(len(txheave))
-        if heavefile is not None:
+        if heavefile is not None and not use_height:
             posheave = np.load(heavefile)
             heavediff = posheave[:,1] - posheave[:,2]
             dh = np.interp(rectime, posheave[:,0], heavediff, left = np.nan, right = np.nan)
@@ -2971,9 +3104,9 @@ class useall(allRead):
         
         # plot scatter plots
         self._plot_wobble_scatter(rxrollvel[:,numrx/2], mainswath_slope, title = 'Roll Rate vs Swath Slope')
-#        self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,0], title = 'Roll Rate vs Sector 0 Slope')
-#        self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,1], title = 'Roll Rate vs Sector 1 Slope')
-#        self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,6], title = 'Roll Rate vs Sector 6 Slope')
+        self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,0], title = 'Roll Rate vs Sector 0 Slope')
+        self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,1], title = 'Roll Rate vs Sector 1 Slope')
+        self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,2], title = 'Roll Rate vs Sector 2 Slope')
 #        self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,7], title = 'Roll Rate vs Sector 7 Slope')
 #        self._plot_wobble_scatter(recheavevel, swath_mean, title = 'Heave Rate vs Swath Mean')
 #        self._plot_wobble_scatter(txpitchvel[:,1], swath_mean, title = 'Pitch Rate vs Swath Mean')
@@ -2985,15 +3118,15 @@ class useall(allRead):
         beams = beams.astype(np.dtype([('Beam Number',np.float)]))
         across_mean_range = across88.mean(axis = 0)
         across_mean_range = across_mean_range.astype(np.dtype([('Across Track Range (m)',np.float)]))
-        self._plot_wobble_scatter(pointing_angles, along_slope, title = 'Beam Angular Bias to Roll Rate Slope Fit vs Across Track Distance', txid = beamtx)
+        #self._plot_wobble_scatter(pointing_angles, along_slope, title = 'Beam Angular Bias to Roll Rate Slope Fit vs Across Track Distance', txid = beamtx)
         #self._plot_wobble_scatter(beams, along_mean, title = 'Interept of fit to Roll Rate vs Beam Number')
 
         # plot a single beam's roll rate vs bias to demonstrate where the regressed plots come from.
-        beam = 20
-        self._plot_wobble_scatter(rxrollvel[:,beam], bias_angle[:,beam], title = 'Regressing beam ' + str(beam) + ' Roll Velocity vs Angular Bias')
+        #beam = 20
+        #self._plot_wobble_scatter(rxrollvel[:,beam], bias_angle[:,beam], title = 'Regressing beam ' + str(beam) + ' Roll Velocity vs Angular Bias')
         print 'done!'
         # np.savez('angles',across = across88[rem:-rem,:],lowpass = low_pass[rem:-rem,:])
-
+        
     def _plot_wobble_scatter(self, data1, data2, title = '', fit = True, mean = False, txid = None, residual = None):
         """
         Takes in two one dimensional record numpy arrays and plots them as
@@ -3009,8 +3142,10 @@ class useall(allRead):
         plt.xlabel(name1)
         plt.ylabel(name2)
         plt.grid()
+        # working around nan values for the fit
+        idx = np.nonzero(~np.isnan(data2[name2]))[0]
         if fit:
-             result= np.polyfit(data1[name1], data2[name2],1)
+             result= np.polyfit(data1[name1][idx], data2[name2][idx],1)
              linefunc = np.poly1d(result)
              xmin = data1[name1].min()
              xmax = data1[name1].max()
@@ -3057,6 +3192,23 @@ class useall(allRead):
                     title = title + ', txid ' + str(int(n)) + ' M: ' + s
         plt.title(title)
         plt.draw()
+        
+    def build_bathymetry(self):
+        """
+        Build and return a numpings by numbeams by 3 array of the xyz88
+        depths, acrosstrack and alongtrack offsets.  The transmit depth
+        is added to the bathymetry.
+        """
+        num88 = self.map.getnum(88)
+        d = self.getrecord(88,0)
+        numbeams = d.header['NumBeams']
+        vals = np.zeros((num88,numbeams,3))
+        for n in np.arange(num88):
+            d = self.getrecord(88,n)
+            vals[n,:,0] = d.data['Depth'] + d.header['TransmitDepth']
+            vals[n,:,1] = d.data['AcrossTrack']
+            vals[n,:,2] = d.data['AlongTrack']
+        return vals
         
     def km_backscatter_normalization(self, pingnumber):
         """
@@ -4358,7 +4510,10 @@ def plot_extinction(fdir = '.', plot_mean = False, plot_lines = True, modes = []
     sd, sam = _build_extinction_curve(points[sidx,1],points[sidx,0])
     
     # get the lines indicating the percentage of depth
-    lines, labels = _percent_depth_lines(points[:,1].max(), points[:,0].min(), points[:,0].max())    
+    maxd = np.nanmax(points[:,1])
+    minx = np.nanmin(points[:,0])
+    maxx = np.nanmax(points[:,0])
+    lines, labels = _percent_depth_lines(maxd, minx, maxx)    
     
     plt.ion()
     
@@ -4386,6 +4541,7 @@ def plot_extinction(fdir = '.', plot_mean = False, plot_lines = True, modes = []
             ax.text(m*-lines[n,1,0],m*lines[n,1,1], labels[n], size = 14, 
                 horizontalalignment='center', verticalalignment='center',
                 bbox=dict(facecolor='white', edgecolor = 'none', alpha=0.5))
+
     ax.set_xlabel('Across Track (m)')
     ax.set_ylabel('Depth (m)')
     plt.legend(loc = 'center')
@@ -4464,7 +4620,7 @@ def _build_extinction_curve(depths, across, binsize = 200):
         am.append( np.sum(avals * winvals) / winvals.sum() ) # window and normalize
     return depthstep, am
     
-def noise_from_passive_wc(path, speed_change_rate = 10, speed_bins = [], extension = 'wcd'):
+def noise_from_passive_wc(path = '.', speed_change_rate = 10, speed_bins = [], extension = 'wcd'):
     """
     Builds an array of noise data by averaging the watercolumn from the files
     at the provided path.  The kwarg speed_change_rate defines the number of
@@ -4697,6 +4853,25 @@ def _assign_speed_bins(speeds, speed_bins, diff_from_bin = 0.5):
             used_speeds.append(sb)
     # find the indicies where accelerations were lower.
     return np.array(sb_idx), used_speeds
+    
+def summarize_directory(directory = '.'):
+    """
+    Print a summary of all the lines in the directory.
+    """
+    flist = glob(directory + '/*.all')
+    if len(flist) > 0:
+        infile = useall(flist[0])
+        vals = infile.get_stats(False)
+        dtype = vals.dtype
+        info = np.zeros(len(flist), dtype = dtype)
+        info[0] = vals
+        infile.close()
+        for n in range(1,len(flist)):
+            infile = useall(flist[n])
+            info[n] = infile.get_stats(False)
+        return info
+    else:
+        return none
        
 def main():        
     if len(sys.argv) > 1:
