@@ -2107,18 +2107,22 @@ class Data88:
     hdr_dtype = np.dtype([('Counter','H'),('Serial#','H'),('Heading','f'),
         ('SoundSpeed','f'),('TransmitDepth','f'),('NumBeams','H'),
         ('NumValid','H'),('SampleFrequency','f'),('Spare','i')])
+    hdr_file_dtype = np.dtype([('Counter', 'H'), ('Serial#', 'H'), ('Heading', 'H'),
+                               ('SoundSpeed', 'H'), ('TransmitDepth', 'f'), ('NumBeams', 'H'),
+                               ('NumValid', 'H'), ('SampleFrequency', 'f'), ('Spare', 'i')])
     xyz_dtype = np.dtype([('Depth','f'),('AcrossTrack','f'),('AlongTrack','f'),
         ('WindowLength','H'),('QualityFactor','B'),('IncidenceAngleAdjustment','f'),
         ('Detection','B'),('Cleaning','b'),('Reflectivity','f')])
+    xyz_file_dtype = np.dtype([('Depth', 'f'), ('AcrossTrack', 'f'), ('AlongTrack', 'f'),
+                               ('WindowLength', 'H'), ('QualityFactor', 'B'), ('IncidenceAngleAdjustment', 'b'),
+                               ('Detection', 'B'), ('Cleaning', 'b'), ('Reflectivity', 'h')])
     
     def __init__(self, datablock, byteswap = False):
         """Catches the binary datablock and decodes the first section and calls
         the decoder for the rest of the record."""
-        hdr_file_dtype = np.dtype([('Counter','H'),('Serial#','H'),('Heading','H'),
-            ('SoundSpeed','H'),('TransmitDepth','f'),('NumBeams','H'),
-            ('NumValid','H'),('SampleFrequency','f'),('Spare','i')])
-        hdr_sz = hdr_file_dtype.itemsize
-        header = np.frombuffer(datablock[:hdr_sz], dtype = hdr_file_dtype)[0]
+
+        hdr_sz = Data88.hdr_file_dtype.itemsize
+        header = np.frombuffer(datablock[:hdr_sz], dtype=Data88.hdr_file_dtype)[0]
         self.header = header.astype(Data88.hdr_dtype)
         self.header['Heading'] *= 0.01  # convert to degrees
         self.header['SoundSpeed'] *= 0.1   # convert to m/s
@@ -2128,12 +2132,9 @@ class Data88:
         """
         Reads the data section of the record.
         """
-        xyz_file_dtype = np.dtype([('Depth','f'),('AcrossTrack','f'),('AlongTrack','f'),
-            ('WindowLength','H'),('QualityFactor','B'),('IncidenceAngleAdjustment','b'),
-            ('Detection','B'),('Cleaning','b'),('Reflectivity','h')])
-        xyz_sz = xyz_file_dtype.itemsize
+        xyz_sz = Data88.xyz_file_dtype.itemsize
         #buffer length goes to -1 because of the uint8 buffer before etx
-        self.data = np.frombuffer(datablock[:-1], dtype = xyz_file_dtype)
+        self.data = np.frombuffer(datablock[:-1], dtype=Data88.xyz_file_dtype)
         self.data = self.data.astype(Data88.xyz_dtype)
         self.data['IncidenceAngleAdjustment'] *= 0.1  # convert to degrees
         self.data['Reflectivity'] *= 0.1 # convert to dB
@@ -4872,7 +4873,20 @@ def summarize_directory(directory = '.'):
         return info
     else:
         return none
-       
+
+def _checksum_all_bytes(bytes):
+    # Calculate checksum by sum of bytes method
+    bytes = bytearray(bytes)
+    chk = sum(bytes) % 2**16
+    return np.uint16(chk)
+
+def checksum_rawdatablock(rawdatablock):
+    # checksum for bytes between STX and ETX
+    # Assuming that the format of the datablock is:
+    # 4 bytes datagram size, 1 byte STX -- DATA -- 1 byte ETX, 2 byte checksum
+    # I.e. 5 bytes excluded at start and 3 bytes at the end
+    return _checksum_all_bytes(rawdatablock[5:-3])
+
 def main():        
     if len(sys.argv) > 1:
         a = allRead(sys.argv[1])
