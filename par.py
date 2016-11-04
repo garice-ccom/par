@@ -25,7 +25,7 @@ OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
 ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 
-V0.3.6 20161018
+V0.3.7 20161104
 This module includes a number of different classes and methods for working with
 Kongsberg all files, each of which are intended to serve at least one of three
 purposes.  These are
@@ -271,8 +271,17 @@ class allRead:
         if not self.mapped:
             self.mapfile()
         if self.map.packdir.has_key(str(recordtype)):
-            loc = self.map.packdir[str(recordtype)][recordnum][0]
-            self.infile.seek(loc)
+            loc = int(self.map.packdir[str(recordtype)][recordnum][0])
+            # deal with moving within large files
+            if loc > 2147483646:
+                loc -= 2e9
+                self.infile.seek(2e9)
+                while loc > 2147483646:
+                    loc -= 2e9
+                    self.infile.seek(2e9,1)
+                self.infile.seek(loc,1)
+            else:
+                self.infile.seek(loc)
             self.read()
             self.get()
             return self.packet.subpack
@@ -2482,7 +2491,8 @@ class Data107:
         a = self.rx['BeamPointingAngle']
         r = np.arange(len(self.ampdata))
         A,R = np.meshgrid(a,r)
-        X = R * np.sin(np.deg2rad(A))
+        # swap sides through -1 to make the negative angle be the positive direction
+        X = -1*R * np.sin(np.deg2rad(A))
         Y = R * np.cos(np.deg2rad(A))
         plt.figure()
         im = plt.pcolormesh(X,Y,self.ampdata)
@@ -2824,11 +2834,14 @@ class useall(allRead):
         nav = self.navarray['80']
         info['Latitude'] = np.array([nav[:,2].min(),nav[:,2].max()])
         info['Longitude'] = np.array([nav[:,1].min(),nav[:,1].max()])
-        depths = self.build_bathymetry()
-        numpings, numbeams = depths[:,:,0].shape
-        centerbeam = int(numbeams/2)
-        centerdata = depths[:,centerbeam,0]
-        info['Depth'] = np.array([centerdata.mean(),centerdata.std()])
+        try:
+            depths = self.build_bathymetry()
+            numpings, numbeams = depths[:,:,0].shape
+            centerbeam = int(numbeams/2)
+            centerdata = depths[:,centerbeam,0]
+            info['Depth'] = np.array([centerdata.mean(),centerdata.std()])
+        except KeyError:
+            info['Depth'] = np.array([np.nan,np.nan])
         if display:
             for n,name in enumerate(info.dtype.names):
                 print name + ' : ' + str(info[n])
@@ -3708,7 +3721,7 @@ class useall(allRead):
         statistics quickly and simply without running out of memory.
         """
         if have_tables:
-            outfilename = self.infilename.split('.')[0] + '.h5'
+            outfilename = self.infilename + '.h5'
             # build the header table used for finding specific metadata
             self.tblfile = tbl.openFile(outfilename, mode = 'w', title = 'Storing watercolumn data')
             metadata_grp = self.tblfile.create_group('/','metadata','Header Information')
@@ -3728,6 +3741,7 @@ class useall(allRead):
             if not self.mapped:
                 self.mapfile()
             numwc = len(set(self.map.packdir['107'][:,1]))
+            progress = 0
             for n in range(numwc):
                 ping = self.getwatercolumn(n)
                 # get the ping header information
@@ -3755,7 +3769,7 @@ class useall(allRead):
                 # get additional helpful info
                 t = self.packet.gettime()
                 extra['POSIXtime'] = t
-                extra['Speed'] = self.get_speed(t)
+                extra['Speed'] = self.getspeed(t)
                 extra['PingInFile'] = n
                 x,y = ping.ampdata.shape
                 extra['TotalSamples'] = x
@@ -3764,6 +3778,10 @@ class useall(allRead):
                 extra['PingStd'] = wc.std()
                 extra['PingName'] = name
                 extra.append()
+                current = 100 * n / numwc
+                if current - progress >= 1:
+                    progress = current
+                    sys.stdout.write('\b\b\b\b\b\b\b\b\b\b%(percent)02d percent' %{'percent':progress})
             header_tbl.flush()
             extra_tbl.flush()
             self.tblfile.close()
@@ -4620,7 +4638,7 @@ def _build_extinction_curve(depths, across, binsize = 200):
         am.append( np.sum(avals * winvals) / winvals.sum() ) # window and normalize
     return depthstep, am
     
-def noise_from_passive_wc(path = '.', speed_change_rate = 10, speed_bins = [], extension = 'wcd'):
+def noise_from_passive_wc(path = '.', speed_change_rate = 10, speed_bins = [], extension = 'wcd', which_swath = 'all'):
     """
     Builds an array of noise data by averaging the watercolumn from the files
     at the provided path.  The kwarg speed_change_rate defines the number of
@@ -4629,6 +4647,8 @@ def noise_from_passive_wc(path = '.', speed_change_rate = 10, speed_bins = [], e
     mode.
     Get FFT by speed - commented out so as not to bog down the process.  This
     appears not to work properly.
+    Adding a "which_swath" kwarg to decide if to use both swaths for a dual
+    swath system.  This can be "all", "odd" or "even" pings.
     """
     badsamples = 20  # there are some unfilled samples at the end of the array
     print "***Warning: dropping the last " + str(badsamples) + " samples***"    
@@ -4642,12 +4662,12 @@ def noise_from_passive_wc(path = '.', speed_change_rate = 10, speed_bins = [], e
     for f in flist:
         path, fname = os.path.split(f)
         print 'Working on file ' + fname
-        a = allRead(f)
+        a = useall(f)
         a.mapfile()
         if not a.map.packdir.has_key('80'):
             altfile = f[:-3] + 'all'
             if os.path.isfile(altfile):
-                b = allRead(altfile)
+                b = useall(altfile)
                 b.mapfile()
             else:
                 print 'No Speed source found for ' + fname
@@ -4655,8 +4675,14 @@ def noise_from_passive_wc(path = '.', speed_change_rate = 10, speed_bins = [], e
         else:
             altfile = ''
         if a.map.packdir.has_key('107'):
-            numwc = len(set(a.map.packdir['107'][:,3]))
-            for n in range(numwc):
+            numwc = a.map.numwc
+            if which_swath == 'all':
+                pingnum = np.arange(numwc)
+            elif which_swath == 'odd':
+                pingnum = np.arange(1,numwc,2)
+            elif which_swath == 'even':
+                pingnum = np.arange(0,numwc,2)
+            for n in pingnum:
                 subpack = a.getwatercolumn(n)
                 if len(altfile) == 0:
                     speed = a.getspeed(a.packet.gettime())
