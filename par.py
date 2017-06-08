@@ -25,7 +25,7 @@ OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
 ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 
-V0.3.9 20170301
+V0.4.0 20170608
 This module includes a number of different classes and methods for working with
 Kongsberg all files, each of which are intended to serve at least one of three
 purposes.  These are
@@ -192,8 +192,8 @@ class allRead:
             except NotImplementedError as err:
                 print(err.message)
             self.packet_read = False
-        
-    def mapfile(self, verbose = False):
+
+    def mapfile(self, verbose=False, show_progress=True):
         """
         Maps the datagrams in the file.
         """
@@ -201,7 +201,8 @@ class allRead:
         if not self.mapped:
             self.map = mappack()
             self.reset()
-            print 'Mapping file;           ',
+            if show_progress:
+                print 'Mapping file;           ',
             while not self.eof:
                 loc = self.infile.tell()
                 self.read()
@@ -220,7 +221,8 @@ class allRead:
                 current = 100 * loc / self.filelen
                 if current - progress >= 1:
                     progress = current
-                    sys.stdout.write('\b\b\b\b\b\b\b\b\b\b%(percent)02d percent' %{'percent':progress})
+                    if show_progress:
+                        sys.stdout.write('\b\b\b\b\b\b\b\b\b\b%(percent)02d percent' %{'percent':progress})
             self.reset()
             # make map into an array and sort by the time stamp
             self.map.finalize()
@@ -231,7 +233,8 @@ class allRead:
             if self.error:
                 print
             else:
-                print '\b\b\b\b\b\b\b\b\b\b\b\b finished mapping file.'
+                if show_progress:
+                    print '\b\b\b\b\b\b\b\b\b\b\b\b finished mapping file.'
             if verbose:
                 self.map.printmap()
             self.mapped = True
@@ -1000,123 +1003,293 @@ class Datagram:
             print name + ' : ' + str(self.header[n])
 
 
-class Data(object):
+class BaseMeta(type):
+    """metaclass to read the "hdr_dtype" attribute and convert it into usable attribute names"""
+
+    def __new__(cls, name, bases, classdict):
+        if 'hdr_dtype' in classdict:
+            # map the dtype names to something python can use as a variable name
+            classdict['_data_keys'] = {}
+            for field in classdict['hdr_dtype'].names:
+                nfield = field.replace(" ", "_").replace("/", "_").replace("(", "").replace("}", "").replace("#", "Num")
+                if nfield in classdict['_data_keys']:
+                    # print "Duplicate field found -- %s in class %s" % (nfield, name)
+                    i = 0
+                    orig_field = nfield
+                    while nfield in classdict['_data_keys']:
+                        i += 1
+                        nfield = "%s%02d" % (orig_field, i)
+                classdict['_data_keys'][nfield] = field
+            # compute the raw size of the data for reading/writing to disk
+            if "raw_dtype" in classdict:
+                classdict['hdr_sz'] = classdict['raw_dtype'].itemsize
+            else:
+                classdict['hdr_sz'] = classdict['hdr_dtype'].itemsize
+
+        return type.__new__(cls, name, bases, classdict)
+
+
+class BaseData(object):
     """
-    Displays contents of the header to the command window.
+    Note: By deriving classes from "BaseData" the reading of data via numpy into
+    an attribute named "header" is automatically done.  It is a numpy record array.
+    The names are in the hdr_type attribute from this class but also can be used
+    directly by their names also.  Further the data will know how to print itself in
+    string form and make a rudimentary plot (if it's based on BasePlottableData).
+
+    Units conversions can also be specified and will be applied in the BaseData.
+
+    To get this functionality follow these steps
+    (Data49 class is a pretty clean example, Data65 is more complex)
+
+    1) supply a "hdr_dtype" attribute that is a numpy dtype with record names like examples below
+
+    2) optionally supply a "conversions" dictionary attribute with the names of the numpy fields
+       and a multiplicative constant = {'TiltTx': 0.01, 'CenterFrequency': 10}
+
+    3) IF the raw data is not in types that you want then supply a "raw_data" decription also,
+       notice in the sample Data002 we are reading PingRate here as a short int "H"
+       but the hdr_dtype will cause it to be converted to a float "f"
+
+    4) IF you need to do advanced processing on some data (change units etc),
+       override the __init__ and get_datablock, again shown in Data003
+
+    For example:
+    # this makes the simplest case, data format is already what we want
+    class Data001(BaseData):   
+         hdr_dtype = np.dtype([('StatusDatagramCount','H'),('SystemSerialNum','H'), ('PingRate',"f")])
+
+    # This example will convert the PingRate from short int "H" into float "f" auto-magically
+    class Data002(BaseData):
+         hdr_dtype = np.dtype([('StatusDatagramCount','H'),('SystemSerialNum','H'), ('PingRate',"f")])
+         raw_dtype = np.dtype([('StatusDatagramCount','H'),('SystemSerialNum','H'), ('PingRate',"H")])
+
+    # This example will convert the PingRate from short int "H" into float "f" auto-magically
+    # but also convert the units from hundreths as the integer to a float.
+    # -- remember that super(Data003, self) is calling the BaseData class functions:
+    class Data003(BaseData):
+         hdr_dtype = np.dtype([('StatusDatagramCount','H'),('SystemSerialNum','H'), ('PingRate',"f")])
+         raw_dtype = np.dtype([('StatusDatagramCount','H'),('SystemSerialNum','H'), ('PingRate',"H")])
+         conversions = {'PingRate': 0.01} #ping rate was in integer hundreths
+         def __init__(self, datablock, byteswap=False):
+            super(Data003, self).__init__(datablock, byteswap=byteswap)
+            # the conversions declared above has the effect of -- self.header['PingRate'] *= 0.01
+            # you can still modify values here if need be -- addition or linear
+            self.header['SystemSerialNum'] += 5
+         def get_datablock(self, data=None):
+            # Must convert the units back first then breate the buffer
+            tmp_header = self.header.copy()  # don't modify our in-memory data so make a copy first
+            self.header['SystemSerialNum'] -= 5  # convert the serial number back that was manually implemented
+            # ping rate will be automatically converted in the BaseData implementation
+            return super(Data003, self).get_datablock(tmp_header)
+
+
+    # e.g. if you create an instance of one of these three data classes like:
+    mydata = DataXXX(datablock)
+
+    # then the following would work the same:
+    mydata.header['PingRate']
+    mydata.header[2]
+    mydata.PingRate
+
+    # You get basic string output like these
+    str(mydata)
+    mydata.get_display_string()
+    print(mydata)
+    mydata.plot() # works if based on BasePlottableData (arrays of data -- not just single headers)
+    mydata.display()  # this would also make a matplotlib plot if derived from BasePlottableData
+
+    # Data can be exported using the get_datablock function too.
+    new_datablock = mydata.get_datablock()
     """
-    def display(self):
-        header = np.zeros(0)
+
+    __metaclass__ = BaseMeta
+    conversions = {}
+
+    def __init__(self, datablock, byteswap=False, read_limit=1):
+        """This gets the format for each block type and then reads the block
+        read_limit is used to determine how much data is read, like a slice index.
+          # By default it will read one record and read it as a single instance of the datatype (everything else will be like slices and be an array)
+          [0] -- just the first record and as a single instance (easier indexing)
+          # a positive integer specifies how many records it will try to read.
+          [:2] -- first two records
+          Zero or None will read all records.
+          [:] -- read all records available
+          A negative integer will read that many less than the number of records available.
+          [:-1] -- reads all but the last record
+        """
+        try:
+            raw_dtype = self.raw_dtype
+        except AttributeError:
+            raw_dtype = self.hdr_dtype
+        if read_limit is None:
+            read_limit = 0
+        if read_limit > 0:
+            num_packets = read_limit
+        else:
+            num_packets = (len(datablock) / self.hdr_sz) - read_limit
+        read_sz = self.hdr_sz * num_packets
+
+        tmp_header = np.frombuffer(datablock[:read_sz], dtype=raw_dtype)
+
+        if read_limit == 1:  # converts from an array to single instance of the data (special case)
+            tmp_header = tmp_header[0]
+        self.header = tmp_header.astype(self.hdr_dtype)
+        if self.conversions:
+            for k, v in self.conversions.items():
+                self.header[k] *= v
+
+    def get_datablock(self, data=None):
+        """data is either the data to convert into a buffer string or None in which case the default data is used.
+        You would pass in a different data set from a derived class if there is units translation or something that
+        must be done first
+        """
+        if data is None:
+            data = self.header
+        if self.conversions:
+            data = data.copy()
+            for k, v in self.conversions.items():
+                data[k] /= v
+        try:
+            raw_dtype = self.raw_dtype
+        except AttributeError:
+            raw_dtype = self.hdr_dtype
+        tmp = data.astype(raw_dtype)
+        datablock = str(np.getbuffer(tmp))  # FIXME: will this work in python 3.x ????
+        return datablock
+
+    def get_display_string(self):
+        """ Displays contents of the header to the command window. """
+        result = ""
         for n, name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
+            result += name + ' : ' + str(self.header[name]) + "\n"
+        return result
+
+    def display(self):
+        print self.__repr__()
+
+    def __repr__(self):
+        return self.get_display_string()
+
+    def __dir__(self):
+        """Custom return of attributes since we have a custom getattr function that adds data members"""
+        s = self.__dict__.keys()
+        s.extend(self._data_keys.keys())
+        s.extend(dir(self.__class__))
+        ns = [v for v in s if v[0] != "_"]
+        ns.sort()
+        return ns
+
+    def __getattr__(self, key):  # Get the value from the underlying subfield (perform any conversion necessary)
+        try:
+            ky2 = self._data_keys[key]  # try to access the subfield
+            return self.header[ky2]
+        except:
+            raise AttributeError(key + " not in " + str(self.__class__))
+
+    def __setattr__(self, key, value):  # Get the value from the underlying subfield (perform any conversion necessary)
+        try:
+            ky2 = self._data_keys[key]  # try to access the subfield
+        except:
+            super(BaseData, self).__setattr__(key, value)
+        else:
+            self.header[ky2] = value
 
 
-class Data48:
+class BasePlottableData(BaseData):
+    def display(self):
+        super(BasePlottableData, self).display()
+        self.plot()
+
+    def plot(self):
+        fig, ax = plt.subplots(len(self.header.dtype.names), 1)
+        for n, a in enumerate(ax):
+            name = self.header.dtype.names[n]
+            a.plot(self.header[name])
+            a.set_title(name)
+            a.set_xlim((0, len(self.header[name])))
+            # a.set_xlabel('index')
+
+
+
+class Data48(BaseData):
     """
     PU information and status 0x30 / '0' / 48.
     """
-    
-    hdr_dtype = np.dtype([('ByteOrderFlag','H'),('System Serial#','H'),
-        ('UDPPort1','H'),('UDPPort2','H'),('UDPPort3','H'),('UDPPort4','H'),
-        ('SystemDescriptor','I'),('PUSoftwareVersion','S16'),
-        ('BSPSoftwareVersion','S16'),('SonarHead/TransceiverSoftware1','S16'),
-        ('SonarHead/TransceiverSoftware2','S16'),('HostIPAddress','I'),
-        ('TXOpeningAngle','B'),('RXOpeningAngle','B'),('Spare1','I'),
-        ('Spare2','H'),('Spare3','B')])
-        
-    def __init__(self, datablock, byteswap = False):
-        """Catches the binary datablock and decodes the first section and calls
-        the decoder for the rest of the record."""
-        
-        hdr_sz = Data48.hdr_dtype.itemsize
-        self.header = np.frombuffer(datablock[:hdr_sz], dtype=Data48.hdr_dtype)[0]
-        
-    def display(self):
-        """
-        Displays contents of the header to the command window.
-        """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
-            
+    hdr_dtype = np.dtype([('ByteOrderFlag', 'H'),('System Serial#', 'H'),
+        ('UDPPort1', 'H'), ('UDPPort2', 'H'),('UDPPort3', 'H'),('UDPPort4', 'H'),
+        ('SystemDescriptor', 'I'), ('PUSoftwareVersion', 'S16'),
+        ('BSPSoftwareVersion', 'S16'), ('SonarHead/TransceiverSoftware1', 'S16'),
+        ('SonarHead/TransceiverSoftware2', 'S16'), ('HostIPAddress', 'I'),
+        ('TXOpeningAngle','B'), ('RXOpeningAngle', 'B'), ('Spare1', 'I'),
+        ('Spare2', 'H'), ('Spare3', 'B')])
 
-class Data49:
+
+class Data49(BaseData):
     """
     PU Status datagram 0x31 / '1' / 49.  All values are converted to degrees,
     meters, and meters per second.
     """
-    
-    hdr_dtype = np.dtype([('StatusDatagramCount','H'),('SystemSerialNum','H'),
-        ('PingRate',"f"),('PingCounter','H'),('SwathDistance','I'),
-        ('SensorInputStatusUDP2','I'),('SensorInputStatusSerial1','I'),
-        ('SensorInputStatusSerial2','I'),('SensorInputStatusSerial3','I'),
-        ('SensorInputStatusSerial4','I'),('PPSstatus','b'),
-        ('PositionStatus','b'),('AttitudeStatus','b'),('ClockStatus','b'),
-        ('HeadingStatus','b'),('PUstatus','B'),('LastHeading',"f"),
-        ('LastRoll',"f"),('LastPitch',"f"),('LastSonarHeave',"f"),
-        ('TransducerSoundSpeed',"f"),('LastDepth',"f"),('ShipVelocity',"f"),
-        ('AttitudeVelocityStatus','B'),('MammalProtectionRamp','B'),
-        ('BackscatterOblique','b'),('BackscatterNormal','b'),('FixedGain','b'),
-        ('DepthNormalIncidence','B'),('RangeNormalIncidence','H'),
-        ('PortCoverage','B'),('StarboardCoverage','B'),
-        ('TransducerSoundSpeedFromProfile',"f"),('YawStabAngle',"f"),
-        ('PortCoverageORAbeamVelocity','h'),
-        ('StarboardCoverageORDownVelocity','h'),('EM2040CPUTemp','b')])
-        
-    def __init__(self, datablock, byteswap = False):
+    hdr_dtype = np.dtype([('StatusDatagramCount', 'H'), ('SystemSerialNum', 'H'),
+        ('PingRate', 'f'), ('PingCounter', 'H'), ('SwathDistance', 'I'),
+        ('SensorInputStatusUDP2', 'I'), ('SensorInputStatusSerial1', 'I'),
+        ('SensorInputStatusSerial2', 'I'), ('SensorInputStatusSerial3', 'I'),
+        ('SensorInputStatusSerial4', 'I'), ('PPSstatus', 'b'),
+        ('PositionStatus', 'b'), ('AttitudeStatus', 'b'), ('ClockStatus', 'b'),
+        ('HeadingStatus', 'b'), ('PUstatus', 'B'), ('LastHeading', "f"),
+        ('LastRoll', "f"), ('LastPitch', "f"), ('LastSonarHeave', "f"),
+        ('TransducerSoundSpeed', "f"), ('LastDepth', "f"), ('ShipVelocity', "f"),
+        ('AttitudeVelocityStatus', 'B'), ('MammalProtectionRamp', 'B'),
+        ('BackscatterOblique', 'b'), ('BackscatterNormal', 'b'), ('FixedGain', 'b'),
+        ('DepthNormalIncidence', 'B'), ('RangeNormalIncidence', 'H'),
+        ('PortCoverage', 'B'), ('StarboardCoverage', 'B'),
+        ('TransducerSoundSpeedFromProfile', "f"), ('YawStabAngle', "f"),
+        ('PortCoverageORAbeamVelocity', 'h'),
+        ('StarboardCoverageORDownVelocity', 'h'), ('EM2040CPUTemp', 'b')])
+
+    raw_dtype = np.dtype([('StatusDatagramCount', 'H'), ('SystemSerialNum', 'H'),
+        ('PingRate', "H"), ('PingCounter', 'H'), ('SwathDistance', 'I'),
+        ('SensorInputStatusUDP2', 'I'), ('SensorInputStatusSerial1', 'I'),
+        ('SensorInputStatusSerial2', 'I'), ('SensorInputStatusSerial3', 'I'),
+        ('SensorInputStatusSerial4', 'I'), ('PPSstatus', 'b'),
+        ('PositionStatus', 'b'), ('AttitudeStatus', 'b'), ('ClockStatus', 'b'),
+        ('HeadingStatus', 'b'), ('PUstatus', 'B'), ('LastHeading', "H"),
+        ('LastRoll', "h"), ('LastPitch', "h"), ('LastSonarHeave', "h"),
+        ('TransducerSoundSpeed', "H"), ('LastDepth', "I"), ('ShipVelocity', "h"),
+        ('AttitudeVelocityStatus', 'B'), ('MammalProtectionRamp', 'B'),
+        ('BackscatterOblique', 'b'), ('BackscatterNormal', 'b'), ('FixedGain', 'b'),
+        ('DepthNormalIncidence', 'B'), ('RangeNormalIncidence', 'H'),
+        ('PortCoverage', 'B'), ('StarboardCoverage', 'B'),
+        ('TransducerSoundSpeedFromProfile', "H"), ('YawStabAngle', "h"),
+        ('PortCoverageORAbeamVelocity', 'h'),
+        ('StarboardCoverageORDownVelocity', 'h'), ('EM2040CPUTemp', 'b')])
+
+    conversions = {'PingRate': 0.01, 'LastHeading': 0.01, 'LastRoll': 0.01, 'LastPitch': 0.01,
+                   'LastSonarHeave': 0.01, 'TransducerSoundSpeed': 0.1, 'LastDepth': 0.01,
+                   'ShipVelocity': 0.01, 'TransducerSoundSpeedFromProfile': 0.01, 'YawStabAngle': 0.01,
+                   }
+
+    def __init__(self, datablock, byteswap=False):
         """Catches the binary datablock and decodes the first section and calls
         the decoder for the rest of the record."""
-        
-        hdr_dtype = np.dtype([('StatusDatagramCount','H'),('SystemSerialNum','H'),
-            ('PingRate',"H"),('PingCounter','H'),('SwathDistance','I'),
-            ('SensorInputStatusUDP2','I'),('SensorInputStatusSerial1','I'),
-            ('SensorInputStatusSerial2','I'),('SensorInputStatusSerial3','I'),
-            ('SensorInputStatusSerial4','I'),('PPSstatus','b'),
-            ('PositionStatus','b'),('AttitudeStatus','b'),('ClockStatus','b'),
-            ('HeadingStatus','b'),('PUstatus','B'),('LastHeading',"H"),
-            ('LastRoll',"h"),('LastPitch',"h"),('LastSonarHeave',"h"),
-            ('TransducerSoundSpeed',"H"),('LastDepth',"I"),('ShipVelocity',"h"),
-            ('AttitudeVelocityStatus','B'),('MammalProtectionRamp','B'),
-            ('BackscatterOblique','b'),('BackscatterNormal','b'),('FixedGain','b'),
-            ('DepthNormalIncidence','B'),('RangeNormalIncidence','H'),
-            ('PortCoverage','B'),('StarboardCoverage','B'),
-            ('TransducerSoundSpeedFromProfile',"H"),('YawStabAngle',"h"),
-            ('PortCoverageORAbeamVelocity','h'),
-            ('StarboardCoverageORDownVelocity','h'),('EM2040CPUTemp','b')])
-        hdr_sz = hdr_dtype.itemsize
-        self.header = np.frombuffer(datablock[:hdr_sz], dtype=hdr_dtype)[0]
-        self.header = self.header.astype(Data49.hdr_dtype)
-        self.header['PingRate'] *= 0.01
-        self.header['LastHeading'] *= 0.01
-        self.header['LastRoll'] *= 0.01
-        self.header['LastPitch'] *= 0.01
-        self.header['LastSonarHeave'] *= 0.01
-        self.header['TransducerSoundSpeed'] *= 0.1
-        self.header['LastDepth'] *= 0.01
-        self.header['ShipVelocity'] *= 0.01
-        self.header['TransducerSoundSpeedFromProfile'] *= 0.01
-        self.header['YawStabAngle'] *= 0.01
-        
-    def display(self):
-        """
-        Displays contents of the header to the command window.
-        """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
-        
-class Data51:
+        super(Data49, self).__init__(datablock, byteswap=byteswap)
+
+
+class Data51(BaseData):
     """
     ExtraParameters datagram.
     """
-    
-    hdr_dtype = np.dtype([('Counter','H'),('Serial#','H'),('ContentIdentifier','H')])
-        
-    def __init__(self, datablock, model, byteswap = False):
+
+    hdr_dtype = np.dtype([('Counter', 'H'), ('Seriel#', 'H'), ('ContentIdentifier', 'H')])
+
+    def __init__(self, datablock, model, byteswap=False):
         """Catches the binary datablock and decodes the first section and calls
         the decoder for the rest of the record."""
-        hdr_sz = Data51.hdr_dtype.itemsize
-        self.header = np.frombuffer(datablock[:hdr_sz], dtype=Data51.hdr_dtype)[0]
+        super(Data51, self).__init__(datablock, byteswap=byteswap)
+        self.model = model
         content_type = self.header[-1]
         if content_type == 1:
-            self.data = datablock[hdr_sz:hdr_sz + 100]
+            self.data = datablock[self.hdr_sz:self.hdr_sz + 100]
         elif content_type == 2:
             pass
         elif content_type == 3:
@@ -1126,13 +1299,13 @@ class Data51:
         elif content_type == 5:
             pass
         elif content_type == 6:
-            data_sz = np.frombuffer(datablock[hdr_sz:hdr_sz+2], dtype='H')[0]
-            self.rawdata = datablock[hdr_sz+2:hdr_sz+2+data_sz]
+            data_sz = np.frombuffer(datablock[self.hdr_sz: self.hdr_sz + 2], dtype='H')[0]
+            self.rawdata = datablock[self.hdr_sz + 2: self.hdr_sz + 2 + data_sz]
             if model == 710:
                 self._parse_710_bscorr()
             elif model == 122:
                 self._parse_122_bscorr()
-            
+
     def _parse_710_bscorr(self):
         """
         Parse the BSCorr file.
@@ -1140,7 +1313,7 @@ class Data51:
         c = self.rawdata.split('#')
         t = len(c)
         n = 0
-        self.names =[]
+        self.names = []
         self.swathnum = []
         self.modes = []
         self.powers = []
@@ -1164,10 +1337,10 @@ class Data51:
                     angle = []
                     offset = []
                     for k in range(numpts):
-                        a,d = sectordata[k+3].split('\t')
+                        a, d = sectordata[k+3].split('\t')
                         angle.append(float(a))
                         offset.append(float(d))
-                    sector.append(np.array(zip(angle,offset)))
+                    sector.append(np.array(zip(angle, offset)))
                 self.data.append(np.array(sector))
                 self.powers.append(np.array(secpower))
             n += 1
@@ -1255,77 +1428,88 @@ class Data51:
             ax.set_ylabel('BS Adjustment (dB)')
             ax.set_title('BSCorr: ' + self.names[mode_number])
             ax.grid()
-    
+
     def display(self):
         """
         Displays contents of the header to the command window.
         """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
+        super(Data51, self).display()
         if self.__dict__.has_key('data'):
             print self.data
-        
-class Data65:
+
+
+class Data65_att(BasePlottableData):
+    hdr_dtype = np.dtype([('Time', 'd'), ('Status', 'H'), ('Roll', 'f'), ('Pitch', 'f'),
+                          ('Heave', 'f'), ('Heading', 'f')])
+    raw_dtype = np.dtype([('Time', 'H'), ('Status', 'H'), ('Roll', 'h'), ('Pitch', 'h'),
+                          ('Heave', 'h'), ('Heading', 'H')])
+    conversions = {'Roll': 0.01, 'Pitch': 0.01, 'Heave': 0.01, 'Heading': 0.01}
+
+    def __init__(self, datablock, POSIXtime, byteswap=False, read_limit=None):
+        """Catches the binary datablock and decodes the first section and calls
+        the decoder for the rest of the record."""
+        super(Data65_att, self).__init__(datablock, byteswap=byteswap, read_limit=read_limit)  # read as many records as passed in
+        self.time = POSIXtime
+        self.header['Time'] = self.header['Time'] * 0.001 + self.time
+
+    def get_datablock(self, data=None):
+        tmp_header = self.header.copy()
+        tmp_header['Time'] = (self.header['Time'] - self.time) * 1000
+        return super(Data65_att, self).get_datablock(tmp_header)
+
+
+class Data65(BaseData):
     """
     Attitude datagram 0x41/'A'/65. Data can be found in the array 'data' and
-    is stored as time (POSIX), roll(deg), pitch(deg), heave(m), 
-    heading(deg).  sensor_descriptor does not appear to parse correctly... 
+    is stored as time (POSIX), roll(deg), pitch(deg), heave(m),
+    heading(deg).  sensor_descriptor does not appear to parse correctly...
     Perhaps it is not included in the header size so it is not sent to this
     object in the datablock?
     """
-    
-    hdr_dtype = np.dtype([('Counter','H'),('Serial#','H'),('NumEntries','H')])
-    att_dtype = np.dtype([('Time','d'),('Status','H'),('Roll','f'),('Pitch','f'),
-        ('Heave','f'),('Heading','f')])
-        
-    def __init__(self, datablock, POSIXtime, byteswap = False):
+
+    hdr_dtype = np.dtype([('Counter', 'H'), ('Seriel#', 'H'), ('NumEntries', 'H')])
+
+    def __init__(self, datablock, POSIXtime, byteswap=False):
         """Catches the binary datablock and decodes the first section and calls
         the decoder for the rest of the record."""
+        super(Data65, self).__init__(datablock, byteswap=byteswap)
         self.time = POSIXtime
-        hdr_sz = Data65.hdr_dtype.itemsize
-        self.header = np.frombuffer(datablock[:hdr_sz], dtype=Data65.hdr_dtype)[0]
         self.sensor_descriptor = np.frombuffer(datablock[-1:], dtype=np.uint8)[0]
-        self.read(datablock[hdr_sz:])
-        
-    def read(self, datablock):
-        """
-        Reads the data section of the record.  Time is in POSIX time,
-        angles are in degrees, distances in meters.
-        """
-        att_file_dtype = np.dtype([('Time','H'),('Status','H'),('Roll','h'),('Pitch','h'),
-            ('Heave','h'),('Heading','H')])
-        self.data = np.frombuffer(datablock[:-1], dtype=att_file_dtype)
-        self.data = self.data.astype(Data65.att_dtype)
-        self.data['Time'] = self.data['Time'] * 0.001 + self.time
-        self.data['Roll'] *= 0.01
-        self.data['Pitch'] *= 0.01
-        self.data['Heave'] *= 0.01
-        self.data['Heading'] *= 0.01
-        
-    def display(self):
-        """
-        Displays contents of the header to the command window.
-        """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
-        print 'Sensor Descriptor : ' + np.binary_repr(self.sensor_descriptor,8)
+        self.att = Data65_att(datablock[self.hdr_sz:-1], POSIXtime, byteswap=byteswap)
+        self.data = self.att.header
 
-class Data66:
+    def get_display_string(self):
+        value = super(Data65, self).get_display_string()
+        value += 'Sensor Descriptor : ' + np.binary_repr(self.sensor_descriptor, 8) + "\n"
+        # value += self.att.get_display_string()
+        return value
+
+    def display(self):
+        super(Data65, self).display()
+        self.att.display()
+
+    def get_datablock(self, data=None):
+        part1 = super(Data65, self).get_datablock()
+        part2 = self.att.get_datablock()
+        part3 = str(np.frombuffer(self.sensor_descriptor, dtype=np.uint8))
+        return part1 + part2 + part3
+
+
+class Data66(BaseData):
     """
     PU BIST results output datagram 0x42/'B'/66.  The raw string text is parsed
     and provided in the array 'data' and 'metadata'.  The raw data 
     string is also available in the 'raw_data' class variable.
     """
-    hdr_dtype = np.dtype([('Counter','H'),('Serial#','H'),('Test#','H'),
-        ('TestStatus','h')])
-        
+    hdr_dtype = np.dtype([('Counter', 'H'), ('Serial#', 'H'), ('Test#', 'H'),
+        ('TestStatus', 'h')])
+
     def __init__(self, datablock, model, byteswap = False):
         """
         Catches the binary datablock and decodes the record.
         """
-        hdr_sz = Data66.hdr_dtype.itemsize
-        self.header = np.frombuffer(datablock[:hdr_sz], dtype = Data66.hdr_dtype)[0]
-        self.raw_data = datablock[hdr_sz:]
+        super(Data66, self).__init__(datablock, byteswap=byteswap)
+        self.raw_data = datablock[self.hdr_sz:]
         self._model = model
         if self.header['Test#'] == 9 and self._model == 2040:
             self.testtype = 'ChannelNoise'
@@ -1337,7 +1521,7 @@ class Data66:
             self.testtype = 'NoiseSpectrum'
         else:
             self.testtype = 'Unknown'
-        
+
     def parse(self):
         """
         Parses the text section. May change with sonar type?
@@ -1355,7 +1539,7 @@ class Data66:
         else:
             print '\n'
             print self.raw_data
-    
+
     def _2040_parse_noisetest(self):
         """
         Should work for the 2040 as of SIS 4.15.
@@ -1387,7 +1571,7 @@ class Data66:
                     n = nmax
             n += 1
         self.data = np.asarray(data).T
-        
+
     def _710_parse_noisetest(self):
         """
         Should work for the EM710 as of SIS 4.15.
@@ -1471,7 +1655,7 @@ class Data66:
         idx = self.freq.argsort()
         self.freq = self.freq[idx]
         self.data = self.data[idx]
-            
+
     def plot(self):
         """
         Plots the results of the BIST test if applicable.
@@ -1514,230 +1698,266 @@ class Data66:
                 print 'Plotting of ' + self.testtype + ' is not supported for the EM' + str(self._model)
         else:
             print "Plotting not supported"
-    
+
     def display(self):
         """
         Displays contents of the header to the command window.
         """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
+        super(Data66, self).display()
         print self.raw_data
-            
-class Data67:
+
+
+class Data67(BaseData):
     """
     Clock datagram 043h / 67d / 'C'. Date is YYYYMMDD. Time is in miliseconds
     since midnight.
     """
-    hdr_dtype = np.dtype([('ClockCounter','H'),('SystemSerial#','H'),
-        ('Date','I'),('Time','I'),('1PPS','B')])
-    def __init__(self,datablock, byteswap = False):
+    hdr_dtype = np.dtype([('ClockCounter', 'H'), ('SystemSerial#', 'H'),
+                          ('Date', 'I'), ('Time', 'I'), ('1PPS', 'B')])
+
+    def __init__(self,datablock, byteswap=False):
         """
         Catches the binary datablock and decodes the first section and calls
         the decoder for the rest of the record.
         """
-        hdr_sz = Data67.hdr_dtype.itemsize
-        self.header = np.frombuffer(datablock[:hdr_sz], 
-            dtype = Data67.hdr_dtype)[0]
-        if len(datablock) > hdr_sz:
-            print len(datablock), hdr_sz
-            
-    def display(self):
-        """
-        Displays contents of the header to the command window.
-        """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
-        
-class Data68:
+        super(Data67, self).__init__(datablock, byteswap=byteswap)
+        if len(datablock) > self.hdr_sz:
+            print len(datablock), self.hdr_sz
+
+class Data68_xyz(BasePlottableData):
+    hdr_dtype = np.dtype([('Depth', "f"), ('AcrossTrack', "f"), ('AlongTrack', "f"),
+        ('BeamDepressionAngle', "f"), ('BeamAzimuthAngle', "f"),
+        ('OneWayRange', "f"), ('QualityFactor', 'B'),
+        ('DetectionWindowLength', "f"), ('Reflectivity', "f"), ('BeamNumber', 'B')])
+    raw_dtype = np.dtype([('Depth', "h"), ('AcrossTrack', "h"), ('AlongTrack', "h"),
+        ('BeamDepressionAngle', "h"), ('BeamAzimuthAngle', "H"),
+        ('OneWayRange', "H"), ('QualityFactor', 'B'),
+        ('DetectionWindowLength', "B"), ('Reflectivity', "b"), ('BeamNumber', 'B')])       
+    conversions = {'BeamDepressionAngle': 0.01, 'BeamAzimuthAngle': 0.01, 'Reflectivity': 0.5}
+    
+    def __init__(self, datablock, data68_info, byteswap=False, read_limit=None):
+        """Catches the binary datablock and decodes the first section and calls
+        the decoder for the rest of the record."""
+        super(Data68_xyz, self).__init__(datablock, byteswap=byteswap, read_limit=read_limit)  # read as many records as passed in
+        self._zres = data68_info['Zresolution']
+        self.header['Depth'] *= self.zres
+        self._xyres = data68_info['XYresolution']
+        self.header['AcrossTrack'] *= self._xyres
+        self.header['AlongTrack'] *= self._xyres
+        self._samplerate = data68_info['SampleRate']
+        self.header['OneWayRange'] /= self._samplerate
+        # self.header['DetectionWindowLength'] *= 4    # not sure what this is for or what it means
+
+    def get_datablock(self, data=None):
+        tmp_header = self.header.copy()
+        tmp_header['Depth'] /= self.zres
+        tmp_header['AcrossTrack'] /= self._xyres
+        tmp_header['AlongTrack'] /= self._xyres
+        tmp_header['OneWayRange'] *= self._samplerate
+        # tmp_header['DetectionWindowLength'] /= 4    # not sure what this is for or what it means
+        return super(Data68_xyz, self).get_datablock(tmp_header)
+
+
+class Data68(BaseData):
     """
     XYZ datagram 044h / 68d / 'D'. All values are converted to meters, degrees,
     or whole units.  The header sample rate may not be correct, but is 
     multiplied by 4 to make the one way travel time per beam appear correct. The
     detection window length per beam is in its raw form...
     """
-    hdr_dtype = np.dtype([('PingCounter','H'),('SystemSerial#','H'),
-        ('VesselHeading',"f"),('SoundSpeed',"f"),('TransducerDepth',"f"),
-        ('MaximumBeams','B'),('ValidBeams','B'),('Zresolution',"f"),
-        ('XYresolution',"f"),('SampleRate','f')])
-    xyz_dtype = np.dtype([('Depth',"f"),('AcrossTrack',"f"),('AlongTrack',"f"),
-        ('BeamDepressionAngle',"f"),('BeamAzimuthAngle',"f"),
-        ('OneWayRange',"f"),('QualityFactor','B'),
-        ('DetectionWindowLength',"f"),('Reflectivity',"f"),('BeamNumber','B')])
-        
-    def __init__(self,datablock, model, byteswap = False):
+    hdr_dtype = np.dtype([('PingCounter', 'H'), ('SystemSerial#', 'H'),
+        ('VesselHeading', "f"), ('SoundSpeed', "f"), ('TransducerDepth', "f"),
+        ('MaximumBeams', 'B'), ('ValidBeams', 'B'), ('Zresolution', "f"),
+        ('XYresolution', "f"), ('SampleRate', 'f')])
+    raw_dtype = np.dtype([('PingCounter', 'H'), ('SystemSerial#', 'H'),
+        ('VesselHeading', "H"), ('SoundSpeed', "H"), ('TransducerDepth', "H"),
+        ('MaximumBeams', 'B'), ('ValidBeams', 'B'), ('Zresolution', "B"),
+        ('XYresolution', "B"), ('SampleRate', 'H')])
+    conversions = {2: 0.01, 3: 0.1, 4: 0.01, 7: 0.01, 8: 0.01,
+                   -1: 4,    # FIXME: revisit this number... it makes the range work but may not be correct
+                   }
+    def __init__(self, datablock, byteswap=False):
         """
         Catches the binary datablock and decodes the first section and calls
         the decoder for the rest of the record.
         """
-        hdr_dtype = np.dtype([('PingCounter','H'),('SystemSerial#','H'),
-            ('VesselHeading',"H"),('SoundSpeed',"H"),('TransducerDepth',"H"),
-            ('MaximumBeams','B'),('ValidBeams','B'),('Zresolution',"B"),
-            ('XYresolution',"B"),('SampleRate','H')])
-        hdr_sz = hdr_dtype.itemsize
-        self._model = model
-        self.header = np.frombuffer(datablock[:hdr_sz], dtype = hdr_dtype)[0]
-        self.header = self.header.astype(Data68.hdr_dtype)
-        self.header[2] *= 0.01
-        self.header[3] *= 0.1
-        self.header[4] *= 0.01
-        self.header[7] *= 0.01
-        self.header[8] *= 0.01
-        self.header[-1] *= 4    # revisit this number... it makes the range work but may not be correct
-        self.depthoffsetmultiplier = np.frombuffer(datablock[-1:], dtype = 'b')[0] * 65536
+        super(Data68, self).__init__(datablock, byteswap=byteswap)
+        self.depthoffsetmultiplier = np.frombuffer(datablock[-1:], dtype='b')[0] * 65536
         self.header[4] += self.depthoffsetmultiplier
-        self.read(datablock[hdr_sz:-1])
-        
-    def read(self, datablock):
-        """
-        Decodes the repeating data section, and shifts all values into meters,
-        degrees, or whole units.
-        """
-        decode_depth = "h"
-        if self._model == 300 or self._model == 120:
-            decode_depth = "H"
-        xyz_dtype = np.dtype([('Depth',decode_depth),('AcrossTrack',"h"),('AlongTrack',"h"),
-            ('BeamDepressionAngle',"h"),('BeamAzimuthAngle',"H"),
-            ('OneWayRange',"H"),('QualityFactor','B'),
-            ('DetectionWindowLength',"B"),('Reflectivity',"b"),('BeamNumber','B')])       
-        self.data = np.frombuffer(datablock, dtype = xyz_dtype)
-        self.data = self.data.astype(Data68.xyz_dtype)
-        self.data['Depth'] *= self.header['Zresolution']
-        self.data['AcrossTrack'] *= self.header['XYresolution']
-        self.data['AlongTrack'] *= self.header['XYresolution']
-        self.data['BeamDepressionAngle'] *= 0.01
-        self.data['BeamAzimuthAngle'] *= 0.01
-        self.data['OneWayRange'] /= self.header['SampleRate']
-        #self.data['DetectionWindowLength'] *= 4    # not sure what this is for or what it means
-        self.data['Reflectivity'] *= 0.5
-        
+        self.xyz = Data68_xyz(datablock[self.hdr_sz:-1], self.header, byteswap=byteswap)
+        self.data = self.xyz.header
+
+    def get_datablock(self, data=None):
+        tmp_header = self.header.copy()
+        tmp_header.header[4] -= self.depthoffsetmultiplier
+        part1 = super(Data68, self).get_datablock(tmp_header)
+        part2 = self.xyz.get_datablock()
+        part3 = str(np.frombuffer([self.depthoffsetmultiplier / 65536], dtype='b'))
+        return part1 + part2 + part3
+
+    def get_display_string(self):
+        s = super(Data68, self).get_display_string()
+        s += 'TransducerDepthOffsetMultiplier : ' + str(self.depthoffsetmultiplier) + "\n"
+        # s += self.xyz.get_display_string()
+        return s
+
     def display(self):
-        """
-        Displays contents of the header to the command window.
-        """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
-        print 'TransducerDepthOffsetMultiplier : ' + str(self.depthoffsetmultiplier)
-            
+        super(Data68, self).display()
+        self.xyz.display()
+
+
+class Data71_ss(BasePlottableData):
+    hdr_dtype = np.dtype([('Time', 'd'), ('SoundSpeed', 'f')])
+    raw_dtype = np.dtype([('Time', 'H'), ('SoundSpeed', 'H')])
+    conversions = {'SoundSpeed': 0.1}
     
-class Data71:
+    def __init__(self, datablock, POSIXtime, byteswap=False, read_limit=None):
+        """Catches the binary datablock and decodes the first section and calls
+        the decoder for the rest of the record."""
+        super(Data71_ss, self).__init__(datablock, byteswap=byteswap, read_limit=read_limit)  # read as many records as passed in
+        self._time = POSIXtime
+        self.header['Time'] += self._time
+
+    def get_datablock(self, data=None):
+        tmp_header = self.header.copy()
+        tmp_header['Time'] -= self._time
+        return super(Data71_ss, self).get_datablock(tmp_header)
+
+
+class Data71(BaseData):
     """
     Surface Sound Speed datagram 047h / 71d / 'G'.  Time is in POSIX time and
     sound speed is in meters per second.
     """
-    hdr_dtype = np.dtype([('SoundSpeedCounter','H'),('SystemSerial#','H'),
-        ('NumEntries','H')])
-    data_dtype = np.dtype([('Time','d'),('SoundSpeed','f')])
-    
+    hdr_dtype = np.dtype([('SoundSpeedCounter', 'H'), ('SystemSerial#', 'H'),
+        ('NumEntries', 'H')])
+
     def __init__(self, datablock, POSIXtime, byteswap = False):
         """
         Catches the binary datablock and decodes the first section and calls
         the decoder for the rest of the record.
         """
-        data_dtype = np.dtype([('Time','H'),('SoundSpeed','H')])
-        hdr_sz = Data71.hdr_dtype.itemsize
-        data_sz = data_dtype.itemsize
-        self.header = np.frombuffer(datablock[:hdr_sz], 
-            dtype = Data71.hdr_dtype)[0]
-        self.data = np.frombuffer(datablock[hdr_sz:-1], dtype = data_dtype)
-        self.data = self.data.astype(Data71.data_dtype)
-        self.data['Time'] += POSIXtime
-        self.data['SoundSpeed'] *= 0.1
-            
-    def display(self):
-        """
-        Displays contents of the header to the command window.
-        """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
-        
-        
-class Data73:
+        super(Data71, self).__init__(datablock, byteswap=byteswap)
+        self.POSIXtime = POSIXtime
+        self.ss = Data71_ss(datablock[self.hdr_sz:-1], POSIXtime, byteswap=byteswap)
+        self.data = self.ss.header
+        self.endchar = datablock[-1]
+
+    def get_datablock(self, data=None):
+        part1 = super(Data71, self).get_datablock()
+        part2 = self.ss.get_datablock()
+        part3 = self.endchar
+        return part1 + part2 + part3
+
+
+class Data73(BaseData):
     """
     Installation parameters datagram 049h (start) / 73d / 'I', 069h(stop)/ 105d
     / 'I' or 70h(remote) / 112d / 'r'.  There is a short header section and the
     remainder of the record is ascii, comma delimited.
     """
-    hdr_dtype = np.dtype([('SurveyLine#','H'),('Serial#','H'),('Serial#2','H')])
-    
-    def __init__(self, datablock, byteswap = False):
+    hdr_dtype = np.dtype([('SurveyLine#', 'H'), ('Serial#', 'H'), ('Serial#2', 'H')])
+
+    def __init__(self, datablock, byteswap=False):
         """
         Catches the binary datablock and decodes the first section and calls
         the decoder for the rest of the record.
         """
-        hdr_sz = Data73.hdr_dtype.itemsize
-        self.header = np.frombuffer(datablock[:hdr_sz],
-            dtype = Data73.hdr_dtype)[0]
-        temp = datablock[hdr_sz:].split(',')
+        super(Data73, self).__init__(datablock, byteswap=byteswap)
+        temp = datablock[self.hdr_sz:].split(',')
         self.settings = {}
         for entry in temp:
             data = entry.split('=')
             if len(data) == 2:
                 self.settings[entry[:3]] = data[1]
-                
-    def display(self):
+
+    def get_display_string(self):
         """
         Displays contents of the header to the command window.
         """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
+        s = super(Data73, self).get_display_string()
         keys = self.settings.keys()
         keys.sort()
         for key in keys:
-            print key + ' : ' + str(self.settings[key])
-    
-    
-class Data78:
+            s += key + ' : ' + str(self.settings[key]) + "\n"
+        return s
+
+    def get_datablock(self, data=None):
+        raise Exception("This data type is not exportable yet.  Need to confirm the format of the ascii data")
+
+
+class Data78_ntx(BaseData):
+    hdr_dtype = np.dtype([('TiltAngle', 'f'), ('Focusing', 'f'), ('SignalLength', 'f'), ('Delay', 'f'),
+        ('Frequency', 'f'), ('AbsorptionCoef', 'f'), ('WaveformID', 'B'),
+        ('TransmitSector#', 'B'), ('Bandwidth', 'f')])
+    raw_dtype = np.dtype([('TiltAngle', 'h'), ('Focusing', 'H'), ('SignalLength', 'f'), ('Delay', 'f'),
+        ('Frequency', 'f'), ('AbsorptionCoef', 'H'), ('WaveformID', 'B'),
+        ('TransmitSector#', 'B'), ('Bandwidth', 'f')])
+    conversions = {'TiltAngle': 0.01,  # convert to degrees
+                   'Focusing': 0.1,   # convert to meters
+                   'AbsorptionCoef': 0.01,  # convert to dB/km
+                   }
+
+    def __init__(self, datablock, byteswap=False, read_limit=None):
+        super(Data78_ntx, self).__init__(datablock, byteswap=byteswap, read_limit=read_limit)  # read as many records as passed in
+
+
+class Data78_nrx(BaseData):
+    hdr_dtype = np.dtype([('BeamPointingAngle', 'f'), ('TransmitSectorID', 'B'), ('DetectionInfo', 'B'),
+        ('WindowLength', 'H'), ('QualityFactor', 'B'), ('Dcorr', 'b'), ('TravelTime', 'f'),
+        ('Reflectivity', 'f'), ('CleaningInfo', 'b'), ('Spare', 'B')])
+    raw_dtype = np.dtype([('BeamPointingAngle', 'h'), ('TransmitSectorID', 'B'), ('DetectionInfo', 'B'),
+        ('WindowLength', 'H'), ('QualityFactor', 'B'), ('Dcorr', 'b'), ('TravelTime', 'f'),
+        ('Reflectivity', 'h'), ('CleaningInfo', 'b'), ('Spare', 'B')])
+    conversions = {'BeamPointingAngle': 0.01,  # convert to degrees
+                   'Reflectivity': 0.1,   # convert to dB
+                   }
+                   
+    def __init__(self, datablock, byteswap=False, read_limit=None):
+        super(Data78_nrx, self).__init__(datablock, byteswap=byteswap, read_limit=read_limit)  # read as many records as passed in
+
+
+class Data78(BaseData):
     """
     Raw range and angle datagram, aka 'N'/'4eh'/78d.  All data is contained
     in the header, rx, and tx arrays. the rx and tx arrays are ordered as in
     the data definition document, but have been converted to degrees, dB,
     meters, etc.
     The reported angles are in the transducer reference frame, so be careful of
-    reverse mounted configurations. For the TX, forward angles are positive, 
+    reverse mounted configurations. For the TX, forward angles are positive,
     for the RX angles to port are positive.
     """
-    
-    hdr_dtype = np.dtype([('Counter','H'),('Serial#','H'),('SoundSpeed','f'),
-        ('Ntx','H'),('Nrx','H'),('Nvalid','H'),('SampleRate','f'),('Dscale','I')])
-    ntx_dtype = np.dtype([('TiltAngle','f'),('Focusing','f'),('SignalLength','f'),('Delay','f'),
-        ('Frequency','f'),('AbsorptionCoef','f'),('WaveformID','B'),
-        ('TransmitSector#','B'),('Bandwidth','f')])
-    nrx_dtype = np.dtype([('BeamPointingAngle','f'),('TransmitSectorID','B'),('DetectionInfo','B'),
-        ('WindowLength','H'),('QualityFactor','B'),('Dcorr','b'),('TravelTime','f'),
-        ('Reflectivity','f'),('CleaningInfo','b'),('Spare','B')])
-    
-    def __init__(self, datablock, pingtime, byteswap = False):
+    hdr_dtype = np.dtype([('Counter', 'H'), ('Serial#', 'H'), ('SoundSpeed', 'f'),
+                          ('Ntx', 'H'), ('Nrx', 'H'), ('Nvalid', 'H'), ('SampleRate', 'f'), ('Dscale', 'I')])
+    raw_dtype = np.dtype([('Counter', 'H'), ('Serial#', 'H'), ('SoundSpeed', 'H'),
+                          ('Ntx', 'H'), ('Nrx', 'H'), ('Nvalid', 'H'), ('SampleRate', 'f'), ('Dscale', 'I')])
+    conversions = {2: 0.1,  # sound speed to convert to meters/second
+                   }
+    def __init__(self, datablock, pingtime, byteswap=False):
         """Catches the binary datablock and decodes the first section and calls
         the decoder for the rest of the record."""
-        hdr_dtype = np.dtype([('Counter','H'),('Serial#','H'),('SoundSpeed','H'),
-            ('Ntx','H'),('Nrx','H'),('Nvalid','H'),('SampleRate','f'),('Dscale','I')])
-        hdr_sz = hdr_dtype.itemsize
+        super(Data78, self).__init__(datablock, byteswap=byteswap)
         self.pingtime = pingtime
-        self.header = np.frombuffer(datablock[:hdr_sz], dtype=hdr_dtype)[0]
-        self.header = self.header.astype(Data78.hdr_dtype)
-        self.header[2] *= 0.1  # sound speed to convert to meters/second
-        self.read(datablock[hdr_sz:])
+        self.read(datablock[self.hdr_sz:])
 
     def read(self, datablock):
         """Decodes the repeating parts of the record."""
-        ntx_file_dtype = np.dtype([('TiltAngle','h'),('Focusing','H'),('SignalLength','f'),('Delay','f'),
-            ('Frequency','f'),('AbsorptionCoef','H'),('WaveformID','B'),
-            ('TransmitSector#','B'),('Bandwidth','f')])
-        ntx_file_sz = ntx_file_dtype.itemsize
-        nrx_file_dtype = np.dtype([('BeamPointingAngle','h'),('TransmitSectorID','B'),('DetectionInfo','B'),
-            ('WindowLength','H'),('QualityFactor','B'),('Dcorr','b'),('TravelTime','f'),
-            ('Reflectivity','h'),('CleaningInfo','b'),('Spare','B')])
         ntx = self.header[3]
-        self.tx = np.frombuffer(datablock[:ntx*ntx_file_sz], dtype = ntx_file_dtype)
-        self.tx = self.tx.astype(Data78.ntx_dtype)
-        self.tx['TiltAngle'] *= 0.01  # convert to degrees
-        self.tx['Focusing'] *= 0.1   # convert to meters
-        self.tx['AbsorptionCoef'] *= 0.01  # convert to dB/km
-        self.rx = np.frombuffer(datablock[ntx*ntx_file_sz:-1], dtype = nrx_file_dtype)
-        self.rx = self.rx.astype(Data78.nrx_dtype)
-        self.rx['BeamPointingAngle'] *= 0.01  # convert to degrees
-        self.rx['Reflectivity'] *= 0.1   # convert to dB
-        
+        self.tx_data = Data78_ntx(datablock[:ntx * Data78_ntx.hdr_sz])
+        self.tx = self.tx_data.header
+
+        self.rx_data = Data78_nrx(datablock[ntx * Data78_ntx.hdr_sz:-1])
+        self.rx = self.rx_data.header
+
+        self.endchar = datablock[-1]
+
+    def get_datablock(self, data=None):
+        part1 = super(Data78, self).get_datablock()
+        part2 = self.tx_data.get_datablock()
+        part3 = self.rx_data.get_datablock()
+        part4 = self.endchar
+        return part1 + part2 + part3 + part4
+
     def get_rx_time(self):
         """
         Returns the receive times in POSIX time.
@@ -1751,88 +1971,152 @@ class Data78:
         rxdelays = txdelays[self.rx['TransmitSectorID']].astype(np.float64)
         rxtime = self.rx['TravelTime'].astype(np.float64) + rxdelays + self.pingtime
         return rxtime
-        
-    def display(self):
-        """
-        Displays contents of the header to the command window.
-        """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
-        
-    
-class Data79:
+
+
+class Data79(BaseData):
     """
     Quality factor datagram 4fh / 79d / 'O'.
     """
-    hdr_dtype = np.dtype([('Counter','H'),('SystemSerial#','H'),
-        ('Nrx','H'),('Npar','H')]) # The data format has a Spare Byte here...
-    qf_dtype = np.dtype([('QualityFactor','f4')])
-    
-    def __init__(self, datablock, byteswap = False):
+    hdr_dtype = np.dtype([('Counter', 'H'), ('SystemSerial#', 'H'),
+        ('Nrx', 'H'), ('Npar', 'H')]) # The data format has a Spare Byte here...
+    qf_dtype = np.dtype([('QualityFactor', 'f4')])
+
+    def __init__(self, datablock, byteswap=False):
         """
         Catches the binary datablock and decodes the first section and calls
         the decoder for the rest of the record.
         """
-        hdr_sz = Data79.hdr_dtype.itemsize
-        self.header = np.frombuffer(datablock[:hdr_sz], dtype = Data79.hdr_dtype)[0]
+        super(Data79, self).__init__(datablock, byteswap=byteswap)
         if self.header['Npar'] > 1:
             print "Warning: Datagram has expanded and may not parse correctly."
-        self.read(datablock[hdr_sz:-1])
-            
+        self.read(datablock[self.hdr_sz:-1])
+
     def read(self, datablock):
         """
         Reads the Quality Factor Datagram.
         """
         if self.header['Npar'] == 1:
-            self.data = np.frombuffer(datablock, dtype = Data79.qf_dtype)
+            self.data = np.frombuffer(datablock, dtype=Data79.qf_dtype)
         else:
             print "Only parsing original IFREMER quality factor"
             step = 4 * self.header['Nrx'] * self.header['Npar']
-            self.data = np.zeros(self.header['Nrx'], dtype = Data79.qf_dtype)
+            self.data = np.zeros(self.header['Nrx'], dtype=Data79.qf_dtype)
             for n in range(self.header['Nrx']):
-                self.data = np.frombuffer(datablock[n*step:n*step+4],
-                    dtype = Data79.qf_dtype)
-                    
-    def display(self):
-        """
-        Displays contents of the header to the command window.
-        """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
-    
-    
-class Data80:
+                self.data = np.frombuffer(datablock[n*step:n*step+4], dtype=Data79.qf_dtype)
+
+    def get_datablock(self, data=None):
+        raise Exception("Not Implemented")
+
+
+
+class Data80_gga(BaseData):
+    hdr_dtype = np.dtype([('MessageID', 'S5'), ('POSIX', 'd'),
+        ('Latitude', 'f'), ('LatDirection', 'S1'), ('Longitude', 'f'),
+        ('LonDirection', 'S1'), ('GPSQuality', 'B'), ('#SV', 'B'), ('HDOP', 'f'),
+        ('OrthometricHeight', 'f'), ('HeightUnits', 'S1'), ('GeoidSeparation', 'f'),
+        ('SeparationUnits', 'S1'), ('AgeOfDGPS', 'f'), ('ReferenceStationID', 'H'),
+        ('CheckSum', 'H')])
+
+    def __init__(self, datablock, byteswap=False, read_limit=None):
+        # don't call the base init as this is not a packed binary array but text data instead
+        self.header = np.zeros(1, dtype=self.hdr_dtype)[0]
+        temp = datablock.split(',')
+        for n, t in enumerate(temp):
+            if len(t) > 0:
+                if n == 0 or n == 3 or n == 5 or n == 10 or n == 12:
+                    self.header[n] = t
+                elif n == 1 or n == 8 or n == 9 or n == 11 or n == 13:
+                    self.header[n] = float(t)
+                elif n == 2:
+                    deg = int(t[:2])
+                    minutes = float(t[2:])
+                    self.header[n] = deg + minutes / 60.
+                elif n == 4:
+                    deg = int(t[:3])
+                    minutes = float(t[3:])
+                    self.header[n] = deg + minutes / 60.
+                elif n == 14:
+                    t2 = t.split('*')
+                    self.header[-2] = int(t2[0])
+                    self.header[-1] = int(t2[1], 16)
+                else:
+                    self.header[n] = int(t)
+            else:
+                self.header[n] = None
+
+    def get_datablock(self, data=None):
+        raise Exception("Writing of GGA not supported yet.")
+
+
+class Data80_ggk(BaseData):
+    hdr_dtype = np.dtype([('MessageID', 'S5'), ('UTCTime', 'd'), ('UTCDay', 'S6'),
+            ('Latitude', 'f'), ('LatDirection', 'S1'), ('Longitude', 'f'),
+            ('LonDirection', 'S1'), ('GPSQuality', 'B'), ('#SV', 'B'), ('DOP', 'f'),
+            ('EllipsoidHeight', 'f'), ('HeightUnits', 'S1'), ('CheckSum', 'H')])
+
+    def __init__(self, datablock, byteswap=False, read_limit=None):
+        # don't call the base init as this is not a packed binary array but text data instead
+        self.header = np.zeros(1, dtype=self.hdr_dtype)[0]
+        temp = datablock.split(',')
+        for n, t in enumerate(temp):
+            if len(t) > 0:
+                if n == 0 or n == 2 or n == 4 or n == 6:
+                    self.header[n] = t
+                elif n == 1 or n == 9:
+                    self.header[n] = float(t)
+                elif n == 3:
+                    deg = int(t[:2])
+                    minutes = float(t[2:])
+                    self.header[n] = deg + minutes / 60.
+                elif n == 5:
+                    deg = int(t[:3])
+                    minutes = float(t[3:])
+                    self.header[n] = deg + minutes / 60.
+                elif n == 10:
+                    self.header[n] = float(t[3:])
+                elif n == 11:
+                    t2 = t.split('*')
+                    self.header[-2] = t2[0]
+                    self.header[-1] = int(t2[1], 16)
+                else:
+                    self.header[n] = int(t)
+            else:
+                self.header[n] = None
+
+    def get_datablock(self, data=None):
+        raise Exception("Writing of GGK not supported yet.")
+
+
+class Data80(BaseData):
     """
     Position datagram, 0x50 / 'P' / 80. Available data is in the header
     list, and all data has been converted to degrees or meters.
     """
-    
-    hdr_dtype = np.dtype([('Counter','H'),('Serial#','H'),('Latitude','d'),
-        ('Longitude','d'),('Quality','f'),('Speed','f'),('Course','f'),
-        ('Heading','f'),('System','B'),('NumberInputBytes','B')])
-    
+
+    hdr_dtype = np.dtype([('Counter', 'H'), ('Serial#', 'H'), ('Latitude', 'd'),
+        ('Longitude', 'd'), ('Quality', 'f'), ('Speed', 'f'), ('Course', 'f'),
+        ('Heading', 'f'), ('System', 'B'), ('NumberInputBytes', 'B')])
+    raw_dtype = np.dtype([('Counter', 'H'), ('Serial#', 'H'), ('Latitude', 'i'),
+        ('Longitude', 'i'), ('Quality', 'H'), ('Speed', 'H'), ('Course', 'H'),
+        ('Heading', 'H'), ('System', 'B'), ('NumberInputBytes', 'B')])
+
     def __init__(self, datablock, byteswap = False):
         """Catches the binary datablock and decodes the record."""
-        hdr_dtype = np.dtype([('Counter','H'),('Serial#','H'),('Latitude','i'),
-            ('Longitude','i'),('Quality','H'),('Speed','H'),('Course','H'),
-            ('Heading','H'),('System','B'),('NumberInputBytes','B')])
-        hdr_sz = hdr_dtype.itemsize
-        self.header = np.frombuffer(datablock[:hdr_sz], dtype = hdr_dtype)[0]
+        super(Data80, self).__init__(datablock, byteswap=byteswap)
         # read the original datagram, of which the size is the last part of the header.
-        self.raw_data = datablock[hdr_sz:hdr_sz+self.header[-1]]
-        self.header = self.header.astype(Data80.hdr_dtype)
+        self.raw_data = datablock[self.hdr_sz:self.hdr_sz + self.header[-1]]
         self.header['Latitude'] /= 20000000.  # convert to degrees
         self.header['Longitude'] /= 10000000.  # convert to degrees
         self.header['Quality'] *= 0.01       # convert to meters
         self.header['Speed'] *= 0.01       # convert to meters/second
         self.header['Course'] *= 0.01       # convert to degrees
         self.header['Heading'] *= 0.01       # convert to degrees
-        
+
     def parse_raw(self):
         """
         Parses the raw_data that arrived in SIS and puts it in source_data.
         """
-        msg_type = np.frombuffer(self.raw_data[:5], dtype = 'S5')
+        msg_type = np.frombuffer(self.raw_data[:5], dtype='S5')
         if msg_type == 'INGGA':
             self._parse_gga()
         elif msg_type == 'GPGGA':
@@ -1841,263 +2125,164 @@ class Data80:
             self._parse_ggk()
         elif msg_type == 'GPGGK':
             self._parse_ggk()
-            
+
     def _parse_gga(self):
         """
         parse the gga string.
         """
-        gga_dtype = np.dtype([('MessageID','S5'),('POSIX','d'),
-            ('Latitude','f'),('LatDirection','S1'),('Longitude','f'),
-            ('LonDirection','S1'),('GPSQuality','B'),('#SV','B'),('HDOP','f'),
-            ('OrthometricHeight','f'),('HeightUnits','S1'),('GeoidSeparation','f'),
-            ('SeparationUnits','S1'),('AgeOfDGPS','f'),('ReferenceStationID','H'),
-            ('CheckSum','H')])
-            
-        self.source_data = np.zeros(1, dtype = gga_dtype)[0]
-        temp = self.raw_data.split(',')
-        for n,t in enumerate(temp):
-            if len(t) > 0:
-                if n == 0 or n == 3 or n == 5 or n == 10 or n == 12:
-                    self.source_data[n] = t
-                elif n == 1 or n == 8 or n == 9 or n == 11 or n == 13:
-                    self.source_data[n] = float(t)
-                elif n == 2:
-                    deg = int(t[:2])
-                    min = float(t[2:])
-                    self.source_data[n] = deg + min/60.
-                elif n == 4:
-                    deg = int(t[:3])
-                    min = float(t[3:])
-                    self.source_data[n] = deg + min/60.
-                elif n == 14:
-                    t2 = t.split('*')
-                    self.source_data[-2] = int(t2[0])
-                    self.source_data[-1] = int(t2[1],16)
-                else:
-                    self.source_data[n] = int(t)
-            else:
-                self.source_data[n] = None
-                
+        self.gg_data = Data80_gga(self.raw_data)
+        self.source_data = self.gg_data.header  # for backward compatibility
+
     def _parse_ggk(self):
         """
         parse the ggk string.
         """
-        ggk_dtype = np.dtype([('MessageID','S5'),('UTCTime','d'),('UTCDay','S6'),
-            ('Latitude','f'),('LatDirection','S1'),('Longitude','f'),
-            ('LonDirection','S1'),('GPSQuality','B'),('#SV','B'),('DOP','f'),
-            ('EllipsoidHeight','f'),('HeightUnits','S1'),('CheckSum','H')])
-            
-        self.source_data = np.zeros(1, dtype = ggk_dtype)[0]
-        temp = self.raw_data.split(',')
-        for n,t in enumerate(temp):
-            if len(t) > 0:
-                if n == 0 or n == 2 or n == 4 or n == 6:
-                    self.source_data[n] = t
-                elif n == 1 or n == 9:
-                    self.source_data[n] = float(t)
-                elif n == 3:
-                    deg = int(t[:2])
-                    min = float(t[2:])
-                    self.source_data[n] = deg + min/60.
-                elif n == 5:
-                    deg = int(t[:3])
-                    min = float(t[3:])
-                    self.source_data[n] = deg + min/60.
-                elif n == 10:
-                    self.source_data[n] = float(t[3:])
-                elif n == 11:
-                    t2 = t.split('*')
-                    self.source_data[-2] = t2[0]
-                    self.source_data[-1] = int(t2[1],16)
-                else:
-                    self.source_data[n] = int(t)
-            else:
-                self.source_data[n] = None
-        
-    def display(self):
-        """
-        Displays contents of the header to the command window.
-        """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
+        self.gg_data = Data80_ggk(self.raw_data)
+        self.source_data = self.gg_data.header  # for backward compatibility
+
+    def get_datablock(self, data=None):
+        raise Exception("Not Implemented")
+
+    def get_display_string(self):
+        s = super(Data80, self).get_display_string()
         self.parse_raw()
-        print '\n***raw data record***'
-        for n,name in enumerate(self.source_data.dtype.names):
-            print name + ' : ' + str(self.source_data[n])
-        
-class Data82:
+        s += '\n***raw data record***\n'
+        s += self.gg_data.get_display_string()
+        return s
+
+class Data82(BaseData):
     """
     Runtime parameters datagram, 0x52 / 'R' / 82.
     Values that are converted into whole units include: AbsorptionCoefficent,
     TransmitPulseLength, TransmitBeamwidth, ReceiveBeamwidth, and
     TransmitAlongTilt.
     """
-    
-    hdr_dtype = np.dtype([('Counter','H'),('SystemSerial#','H'),
-        ('OperatorStationStatus','B'),('ProcessingUnitStatus','B'),
-        ('BSPStatus','B'),('SonarHeadOrTransceiverStatus','B'),
-        ('Mode','B'),('FilterID','B'),('MinDepth','H'),('MaxDepth','H'),
-        ('AbsorptionCoefficent','f'),('TransmitPulseLength','f'),
-        ('TransmitBeamWidth','f'),('TransmitPower','b'),
-        ('ReceiveBeamWidth','f'),('ReceiveBandWidth50Hz','B'),
-        ('ReceiverFixedGain','B'),('TVGlawCrossoverAngle','B'),
-        ('SourceOfSoundSpeed','B'),('MaxPortSwathWidth','H'),
-        ('BeamSpacing','B'),('MaxPortCoverage','B'),
-        ('YawAndPitchStabilization','B'),('MaxStarboardCoverage','B'),
-        ('MaxStarboardSwathWidth','H'),('TransmitAlongTilt','f'),
-        ('HiLoFrequencyAbsorptionCoeffRatio','B')])
-    
-    def __init__(self, datablock, byteswap = False):
+
+    hdr_dtype = np.dtype([('Counter', 'H'), ('SystemSerial#', 'H'),
+        ('OperatorStationStatus', 'B'), ('ProcessingUnitStatus', 'B'),
+        ('BSPStatus', 'B'), ('SonarHeadOrTransceiverStatus', 'B'),
+        ('Mode', 'B'), ('FilterID', 'B'), ('MinDepth', 'H'), ('MaxDepth', 'H'),
+        ('AbsorptionCoefficent', 'f'), ('TransmitPulseLength', 'f'),
+        ('TransmitBeamWidth', 'f'), ('TransmitPower', 'b'),
+        ('ReceiveBeamWidth', 'f'), ('ReceiveBandWidth50Hz', 'B'),
+        ('ReceiverFixedGain', 'B'), ('TVGlawCrossoverAngle', 'B'),
+        ('SourceOfSoundSpeed', 'B'), ('MaxPortSwathWidth', 'H'),
+        ('BeamSpacing', 'B'), ('MaxPortCoverage', 'B'),
+        ('YawAndPitchStabilization', 'B'), ('MaxStarboardCoverage', 'B'),
+        ('MaxStarboardSwathWidth', 'H'), ('TransmitAlongTilt', 'f'),
+        ('HiLoFrequencyAbsorptionCoeffRatio', 'B')])
+    raw_dtype = np.dtype([('Counter', 'H'), ('SystemSerial#', 'H'),
+        ('OperatorStationStatus', 'B'), ('ProcessingUnitStatus', 'B'),
+        ('BSPStatus', 'B'), ('SonarHeadOrTransceiverStatus', 'B'),
+        ('Mode', 'B'), ('FilterID', 'B'), ('MinDepth', 'H'), ('MaxDepth', 'H'),
+        ('AbsorptionCoefficent', 'H'), ('TransmitPulseLength', 'H'),
+        ('TransmitBeamWidth', 'H'), ('TransmitPower', 'b'),
+        ('ReceiveBeamWidth', 'B'), ('ReceiveBandWidth50Hz', 'B'),
+        ('ReceiverFixedGain', 'B'), ('TVGlawCrossoverAngle', 'B'),
+        ('SourceOfSoundSpeed', 'B'), ('MaxPortSwathWidth', 'H'),
+        ('BeamSpacing', 'B'), ('MaxPortCoverage', 'B'),
+        ('YawAndPitchStabilization', 'B'), ('MaxStarboardCoverage', 'B'),
+        ('MaxStarboardSwathWidth', 'H'), ('TransmitAlongTilt', 'h'),
+        ('HiLoFrequencyAbsorptionCoeffRatio', 'B')])
+    conversions = {'AbsorptionCoefficent': 0.01, 'TransmitPulseLength': 0.000001,
+                   'TransmitBeamWidth': 0.1, 'ReceiveBeamWidth': 0.1, 'TransmitAlongTilt': 0.1,
+                   }
+                   
+    def __init__(self, datablock, byteswap=False):
         """Catches the binary datablock and decodes the record."""
-        hdr_dtype = np.dtype([('Counter','H'),('SystemSerial#','H'),
-            ('OperatorStationStatus','B'),('ProcessingUnitStatus','B'),
-            ('BSPStatus','B'),('SonarHeadOrTransceiverStatus','B'),
-            ('Mode','B'),('FilterID','B'),('MinDepth','H'),('MaxDepth','H'),
-            ('AbsorptionCoefficent','H'),('TransmitPulseLength','H'),
-            ('TransmitBeamWidth','H'),('TransmitPower','b'),
-            ('ReceiveBeamWidth','B'),('ReceiveBandWidth50Hz','B'),
-            ('ReceiverFixedGain','B'),('TVGlawCrossoverAngle','B'),
-            ('SourceOfSoundSpeed','B'),('MaxPortSwathWidth','H'),
-            ('BeamSpacing','B'),('MaxPortCoverage','B'),
-            ('YawAndPitchStabilization','B'),('MaxStarboardCoverage','B'),
-            ('MaxStarboardSwathWidth','H'),('TransmitAlongTilt','h'),
-            ('HiLoFrequencyAbsorptionCoeffRatio','B')])
-        hdr_sz = hdr_dtype.itemsize
-        temp = np.frombuffer(datablock[:hdr_sz], dtype = hdr_dtype)[0]
-        self.header = temp.astype(Data82.hdr_dtype)
-        self.header['AbsorptionCoefficent'] *= 0.01
-        self.header['TransmitPulseLength'] *= 0.000001
-        self.header['TransmitBeamWidth'] *= 0.1
-        self.header['ReceiveBeamWidth'] *= 0.1
-        self.header['TransmitAlongTilt'] *= 0.1        
-    
-    def print_byte(self, field_number):
+        super(Data82, self).__init__(datablock, byteswap=byteswap)
+
+    def repr_byte(self, field_number):
         """
         Prints the given 1 bite field in a binary form.
         """
         if type(self.header[field_number]) == np.uint8:
-            print np.binary_repr(self.header[field_number], width = 8)
-            
-    def display(self):
+            return str(np.binary_repr(self.header[field_number], width=8))
+
+    def print_byte(self, field_number):
+        print self.repr_byte(field_number)
+
+    def get_display_string(self):
         """
         Displays contents of the header to the command window.
         """
-        bitfields = np.array([2,3,4,5,6,7,18,20,22,26])
-        for n,name in enumerate(self.header.dtype.names):
+        s = ""
+        bitfields = np.array([2, 3, 4, 5, 6, 7, 18, 20, 22, 26])
+        for n, name in enumerate(self.header.dtype.names):
             if np.any(bitfields == n):
-                print name + ' : ' + np.binary_repr(self.header[n], width = 8)
+                s += name + ' : ' + np.binary_repr(self.header[n], width=8) + "\n"
             else:
-                print name + ' : ' + str(self.header[n])
-                
-                
-class Data83:
+                s += name + ' : ' + str(self.header[n]) + "\n"
+        return s
+
+class Data83(BaseData):
     """
     Seabed Imagary datagram 053h / 83d / 'Seabed image data'.  All data is
     converted into whole units of degrees, meters, dB, etc, except Oblique
     Backscatter and Normal Backscatter which are in their raw form.
     """
-    hdr_dtype = np.dtype([('PingCounter','H'),('SystemSerial#','H'),
-        ('MeanAbsorption',"f"),('PulseLength',"f"),('RangeToNormal','H'),
-        ('StartRangeSampleOfTVG','H'),('StopRangeSampleOfTVG','H'),
-        ('NormalIncidenceBS',"f"),('ObliqueBS',"f"),('TxBeamwidth',"f"),
-        ('TVGLawCrossoverAngle',"f"),('NumberValidBeams','B')])
-    beaminfo_dtype = np.dtype([('BeamIndexNumber','B'),('SortingDirection','b'),
-        ('#SamplesPerBeam','H'),('CenterSample#','H')])
-    
+    hdr_dtype = np.dtype([('PingCounter', 'H'), ('SystemSerial#', 'H'),
+        ('MeanAbsorption', "f"), ('PulseLength', "f"), ('RangeToNormal', 'H'),
+        ('StartRangeSampleOfTVG', 'H'), ('StopRangeSampleOfTVG', 'H'),
+        ('NormalIncidenceBS', "f"), ('ObliqueBS', "f"), ('TxBeamwidth', "f"),
+        ('TVGLawCrossoverAngle', "f"), ('NumberValidBeams', 'B')])
+    raw_dtype = np.dtype([('PingCounter', 'H'), ('SystemSerial#', 'H'),
+        ('MeanAbsorption', "H"), ('PulseLength', "H"), ('RangeToNormal', 'H'),
+        ('StartRangeSampleOfTVG', 'H'), ('StopRangeSampleOfTVG', 'H'),
+        ('NormalIncidenceBS', "b"), ('ObliqueBS', "b"), ('TxBeamwidth', "H"),
+        ('TVGLawCrossoverAngle', "B"), ('NumberValidBeams', 'B')])
+    conversions = {2: 0.01, 3: 10**-6, 
+                   7: 1,  # FIXME: check this
+                   8: 1,  # FIXME: check this
+                   9: 0.1, 10: 0.1,
+                   }
+    beaminfo_dtype = np.dtype([('BeamIndexNumber', 'B'), ('SortingDirection', 'b'),
+        ('#SamplesPerBeam', 'H'), ('CenterSample#', 'H')])
+
     def __init__(self, datablock, byteswap = False):
         """
         Catches the binary datablock and decodes the first section and calls
         the decoder for the rest of the record.
         """
-        hdr_dtype = np.dtype([('PingCounter','H'),('SystemSerial#','H'),
-            ('MeanAbsorption',"H"),('PulseLength',"H"),('RangeToNormal','H'),
-            ('StartRangeSampleOfTVG','H'),('StopRangeSampleOfTVG','H'),
-            ('NormalIncidenceBS',"b"),('ObliqueBS',"b"),('TxBeamwidth',"H"),
-            ('TVGLawCrossoverAngle',"B"),('NumberValidBeams','B')])
-        hdr_sz = hdr_dtype.itemsize
-        self.header = np.frombuffer(datablock[:hdr_sz], dtype = hdr_dtype)[0]
-        self.header = self.header.astype(Data83.hdr_dtype)
-        self.header[2] *= 0.01
-        self.header[3] *= 10**-6
-        self.header[7] *= 1  # check this
-        self.header[8] *= 1  # check this
-        self.header[9] *= 0.1  
-        self.header[10] *= 0.1
+        super(Data83, self).__init__(datablock, byteswap=byteswap)
         numbeams = self.header[-1]
-        self._read(datablock[hdr_sz:], numbeams)
-    
+
+        self._read(datablock[self.hdr_sz:], numbeams)
+
     def _read(self, datablock, numbeams):
         """
         Reads the data section of the record.
         """
-        beaminfo_sz = Data89.beaminfo_dtype.itemsize
-        samples_dtype = np.dtype([('Amplitude',"b")])    
+        beaminfo_sz = Data83.beaminfo_dtype.itemsize
+        samples_dtype = np.dtype([('Amplitude', "b")])    
         samples_sz = samples_dtype.itemsize
         p = beaminfo_sz*numbeams
-        self.beaminfo = np.frombuffer(datablock[:p],
-            dtype = Data89.beaminfo_dtype)
+        self.beaminfo = np.frombuffer(datablock[:p], dtype = Data83.beaminfo_dtype)
         maxsamples = self.beaminfo['#SamplesPerBeam'].max()
         self.samples = np.zeros((numbeams,maxsamples), dtype = 'float')
         for n in range(numbeams):
             numsamples = self.beaminfo[n]['#SamplesPerBeam']
-            temp = np.frombuffer(datablock[p:p+numsamples*samples_sz],
-                dtype = samples_dtype)
+            temp = np.frombuffer(datablock[p:p+numsamples*samples_sz], dtype=samples_dtype)
             p += numsamples*samples_sz
             #startsample = self.beaminfo[n]['CenterSample#']
             self.samples[n,:numsamples] = temp.astype('float')[:]
-        self.samples *= 0.5  # check this
+        self.samples *= 0.5  # FIXME: check this
 
-        
-    def display(self):
-        """
-        Displays contents of the header to the command window.
-        """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
+    def get_datablock(self, data=None):
+        raise Exception("Not Implemented")
 
-            
-class Data85:
-    """
-    Sound Speed datagram 055h / 85d / 'U'. Time is in POSIX, depth
-    is in meters, sound speed is in meters per second.
-    """
-    hdr_dtype = np.dtype([('ProfileCounter','H'),('SystemSerial#','H'),
-        ('Date','I'),('Time',"d"),('NumEntries','H'),('DepthResolution','H')])
-    data_dtype = np.dtype([('Depth','d'),('SoundSpeed','f')])
-    
-    def __init__(self, datablock, byteswap = False):
-        """
-        Catches the binary datablock and decodes the first section and calls
-        the decoder for the rest of the record.
-        """
-        hdr_dtype = np.dtype([('ProfileCounter','H'),('SystemSerial#','H'),
-            ('Date','I'),('Time',"I"),('NumEntries','H'),
-            ('DepthResolution','H')])
-        hdr_sz = hdr_dtype.itemsize
-        data_dtype = np.dtype([('Depth','I'),('SoundSpeed','I')])
-        self.header = np.frombuffer(datablock[:hdr_sz], 
-            dtype = hdr_dtype)[0]
-        self.header = self.header.astype(Data85.hdr_dtype)
-        self.POSIXtime = self._maketime(self.header['Date'], self.header['Time'])
-        depth_resolution = self.header['DepthResolution'] * 0.01
-        self.data = np.frombuffer(datablock[hdr_sz:-1], dtype = data_dtype)
-        self.data = self.data.astype(Data85.data_dtype)
-        self.data['Depth'] *= depth_resolution
-        self.data['SoundSpeed'] *= 0.1
-        
-    def _maketime(self, date, time):
-        """
-        Makes the time stamp of the current packet as a POSIX time stamp.
-        UTC is assumed.
-        """
-        date = str(date)
-        year = int(date[:4])
-        month = int(date[4:6])
-        day = int(date[6:])
-        numdays = dtm.date(year, month, day).toordinal() - dtm.date(1970,1,1).toordinal()
-        dayseconds = time #* 0.001
-        return numdays * 24 * 60 * 60 + dayseconds
-        
+
+class Data85_soundspeed(BaseData):
+    hdr_dtype = np.dtype([('Depth', 'd'), ('SoundSpeed', 'f')])
+    raw_dtype = np.dtype([('Depth', 'I'), ('SoundSpeed', 'I')])
+    conversions = {'SoundSpeed': 0.1}
+    def __init__(self, datablock, depth_resolution, byteswap=False, read_limit=None):
+        # add the depth resolution to just the current class instance rather than all occurances of Data85
+        self.conversions = {'Depth': depth_resolution} 
+        self.conversions.update(Data85_soundspeed.conversions)
+        super(Data85_soundspeed, self).__init__(datablock, byteswap=byteswap, read_limit=read_limit)  # read as many records as passed in
+        self.depth_resolution = depth_resolution
+
     def plot(self):
         """
         Creates a simple plot of the cast.
@@ -2109,94 +2294,158 @@ class Data85:
         plt.ylabel('Depth (m)')
         plt.title('Cast at POSIX time ' + str(self.header['Time']))
         plt.draw()
-            
-    def display(self):
+
+
+class Data85(BaseData):
+    """
+    Sound Speed datagram 055h / 85d / 'U'. Time is in POSIX, depth
+    is in meters, sound speed is in meters per second.
+    """
+    hdr_dtype = np.dtype([('ProfileCounter', 'H'), ('SystemSerial#', 'H'),
+        ('Date', 'I'), ('Time', "d"), ('NumEntries', 'H'), ('DepthResolution', 'H')])
+    raw_dtype = np.dtype([('ProfileCounter', 'H'), ('SystemSerial#', 'H'),
+        ('Date', 'I'), ('Time', "I"), ('NumEntries', 'H'),
+        ('DepthResolution', 'H')])
+
+    def __init__(self, datablock, byteswap=False):
+        """
+        Catches the binary datablock and decodes the first section and calls
+        the decoder for the rest of the record.
+        """
+        super(Data85, self).__init__(datablock, byteswap=byteswap)
+        self.POSIXtime = self._maketime(self.header['Date'], self.header['Time'])
+        depth_resolution = self.header['DepthResolution'] * 0.01
+
+        self.ss = Data85_soundspeed(datablock[self.hdr_sz:-1], depth_resolution)
+        self.last_byte = datablock[-1]
+        self.data = self.ss.header  # backward compatibility
+
+    def get_datablock(self, data=None):
+        # FIXME: Not sure what happens if TVG was removed
+        part1 = super(Data85, self).get_datablock()
+        part2 = self.ss.get_datablock()
+        return part1 + part2 + self.last_byte
+
+    def _maketime(self, date, time):
+        """
+        Makes the time stamp of the current packet as a POSIX time stamp.
+        UTC is assumed.
+        """
+        date = str(date)
+        year = int(date[:4])
+        month = int(date[4:6])
+        day = int(date[6:])
+        numdays = dtm.date(year, month, day).toordinal() - dtm.date(1970, 1, 1).toordinal()
+        dayseconds = time  # * 0.001
+        return numdays * 24 * 60 * 60 + dayseconds
+
+    def plot(self):
+        """
+        Creates a simple plot of the cast.
+        """
+        self.ss.plot()
+
+    def get_display_string(self):
         """
         Displays contents of the header to the command window.
         """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
-        print "POSIXtime : " + str(self.POSIXtime)
-         
-class Data88:
+        s = super(Data85, self).get_display_string()
+        s += "\n"
+        s += "POSIXtime : " + str(self.POSIXtime) + "\n"
+        return s
+
+
+class Data88_xyz(BaseData):
+    hdr_dtype = np.dtype([('Depth', 'f'), ('AcrossTrack', 'f'), ('AlongTrack', 'f'),
+        ('WindowLength', 'H'), ('QualityFactor', 'B'), ('IncidenceAngleAdjustment', 'f'),
+        ('Detection', 'B'), ('Cleaning', 'b'), ('Reflectivity', 'f')])
+    raw_dtype = np.dtype([('Depth', 'f'), ('AcrossTrack', 'f'), ('AlongTrack', 'f'),
+                               ('WindowLength', 'H'), ('QualityFactor', 'B'), ('IncidenceAngleAdjustment', 'b'),
+                               ('Detection', 'B'), ('Cleaning', 'b'), ('Reflectivity', 'h')])
+    conversions = {'IncidenceAngleAdjustment': 0.1,  # convert to degrees
+                   'Reflectivity': 0.1,  # convert to dB
+                   }
+    def __init__(self, datablock, byteswap=False, read_limit=None):
+        super(Data88_xyz, self).__init__(datablock, byteswap=byteswap, read_limit=read_limit)  # read as many records as passed in
+
+
+class Data88(BaseData):
     """
     XYZ datagram, 0x58 / 'X' / 88.  All data is in the header list or
     stored in the 'data' array.  Values have been converted to degrees and
     dB.
     """
-    
-    hdr_dtype = np.dtype([('Counter','H'),('Serial#','H'),('Heading','f'),
-        ('SoundSpeed','f'),('TransmitDepth','f'),('NumBeams','H'),
-        ('NumValid','H'),('SampleFrequency','f'),('Spare','i')])
-    hdr_file_dtype = np.dtype([('Counter', 'H'), ('Serial#', 'H'), ('Heading', 'H'),
+    hdr_dtype = np.dtype([('Counter', 'H'), ('Serial#', 'H'), ('Heading', 'f'),
+        ('SoundSpeed', 'f'), ('TransmitDepth', 'f'), ('NumBeams', 'H'),
+        ('NumValid', 'H'), ('SampleFrequency', 'f'), ('Spare', 'i')])
+    raw_dtype = np.dtype([('Counter', 'H'), ('Serial#', 'H'), ('Heading', 'H'),
                                ('SoundSpeed', 'H'), ('TransmitDepth', 'f'), ('NumBeams', 'H'),
                                ('NumValid', 'H'), ('SampleFrequency', 'f'), ('Spare', 'i')])
-    xyz_dtype = np.dtype([('Depth','f'),('AcrossTrack','f'),('AlongTrack','f'),
-        ('WindowLength','H'),('QualityFactor','B'),('IncidenceAngleAdjustment','f'),
-        ('Detection','B'),('Cleaning','b'),('Reflectivity','f')])
-    xyz_file_dtype = np.dtype([('Depth', 'f'), ('AcrossTrack', 'f'), ('AlongTrack', 'f'),
-                               ('WindowLength', 'H'), ('QualityFactor', 'B'), ('IncidenceAngleAdjustment', 'b'),
-                               ('Detection', 'B'), ('Cleaning', 'b'), ('Reflectivity', 'h')])
-    
+    conversions = {'Heading': 0.01,  # convert to degrees
+                   'SoundSpeed': 0.1,   # convert to m/s
+                   }
     def __init__(self, datablock, byteswap = False):
         """Catches the binary datablock and decodes the first section and calls
         the decoder for the rest of the record."""
+        super(Data88, self).__init__(datablock, byteswap=byteswap)
 
-        hdr_sz = Data88.hdr_file_dtype.itemsize
-        header = np.frombuffer(datablock[:hdr_sz], dtype=Data88.hdr_file_dtype)[0]
-        self.header = header.astype(Data88.hdr_dtype)
-        self.header['Heading'] *= 0.01  # convert to degrees
-        self.header['SoundSpeed'] *= 0.1   # convert to m/s
-        self.read(datablock[hdr_sz:])
-        
+        self.read(datablock[self.hdr_sz:])  # calling this way to maintain backward compatibility
+
     def read(self, datablock):
         """
         Reads the data section of the record.
         """
-        xyz_sz = Data88.xyz_file_dtype.itemsize
         #buffer length goes to -1 because of the uint8 buffer before etx
-        self.data = np.frombuffer(datablock[:-1], dtype=Data88.xyz_file_dtype)
-        self.data = self.data.astype(Data88.xyz_dtype)
-        self.data['IncidenceAngleAdjustment'] *= 0.1  # convert to degrees
-        self.data['Reflectivity'] *= 0.1 # convert to dB
+        self.xyz = Data88_xyz(datablock[:-1])
+        self.last_byte = datablock[-1]
+        self.data = self.xyz.header
 
-    def display(self):
-        """
-        Displays contents of the header to the command window.
-        """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
-            
-            
-class Data89:
+    def get_datablock(self, data=None):
+        # FIXME: missing one character at the end??  See the read function
+        part1 = super(Data88, self).get_datablock()
+        part2 = self.xyz.get_datablock()
+        return part1 + part2 + self.last_byte
+
+
+class Data89_beaminfo(BaseData):
+    hdr_dtype = np.dtype([('SortingDirection', 'b'), ('DetectionInfo', 'B'),
+        ('#SamplesPerBeam', 'H'), ('CenterSample#', 'H')])
+    def __init__(self, datablock, byteswap=False, read_limit=None):
+        super(Data89_beaminfo, self).__init__(datablock, byteswap=byteswap, read_limit=read_limit)  # read as many records as passed in
+
+
+class Data89_samples(BaseData):
+    hdr_dtype = np.dtype([('Amplitude', "f2")])  # FIXME: float16 is right type?
+    raw_dtype = np.dtype([('Amplitude', "h")])
+    conversions = {'Amplitude': 0.1,
+                   }    
+    def __init__(self, datablock, byteswap=False, read_limit=None):
+        super(Data89_samples, self).__init__(datablock, byteswap=byteswap, read_limit=read_limit)  # read as many records as passed in
+
+class Data89(BaseData):
     """
     Seabed Image datagram 059h / 89d / 'Y'.
     """
-    
-    hdr_dtype = np.dtype([('Counter','H'),('SystemSerial#','H'),
-        ('SamplingFreq','f'),('RangeToNormal','H'),('NormalBackscatter',"f"),
-        ('ObliqueBackscatter',"f"),('TXBeamWidth',"f"),('TVGCrossover',"f"),
-        ('NumberValidBeams','H')])
-    beaminfo_dtype = np.dtype([('SortingDirection','b'),('DetectionInfo','B'),
-        ('#SamplesPerBeam','H'),('CenterSample#','H')])
-    
-    def __init__(self, datablock, byteswap = False):
+    hdr_dtype = np.dtype([('Counter', 'H'), ('SystemSerial#', 'H'),
+        ('SamplingFreq', 'f'), ('RangeToNormal', 'H'), ('NormalBackscatter', "f"),
+        ('ObliqueBackscatter', "f"), ('TXBeamWidth', "f"), ('TVGCrossover', "f"),
+        ('NumberValidBeams', 'H')])
+    raw_dtype = np.dtype([('Counter', 'H'), ('SystemSerial#', 'H'),
+        ('SamplingFreq', 'f'), ('RangeToNormal', 'H'), ('NormalBackscatter', "h"),
+        ('ObliqueBackscatter', "h"), ('TXBeamWidth', "H"), ('TVGCrossover', "H"),
+        ('NumberValidBeams', 'H')])
+    conversions = {'NormalBackscatter': 0.1, 'ObliqueBackscatter': 0.1,
+                   'TXBeamWidth': 0.1, 'TVGCrossover': 0.1,
+                   }
+
+    def __init__(self, datablock, byteswap=False):
         """Catches the binary datablock and decodes the first section and calls
         the decoder for the rest of the record."""
-        hdr_dtype = np.dtype([('Counter','H'),('SystemSerial#','H'),
-            ('SamplingFreq','f'),('RangeToNormal','H'),('NormalBackscatter',"h"),
-            ('ObliqueBackscatter',"h"),('TXBeamWidth',"H"),('TVGCrossover',"H"),
-            ('NumberValidBeams','H')])
-        hdr_sz = hdr_dtype.itemsize
-        self.header = np.frombuffer(datablock[:hdr_sz], dtype = hdr_dtype)[0]
-        self.header = self.header.astype(Data89.hdr_dtype)
-        self.header['NormalBackscatter'] *= 0.1
-        self.header['ObliqueBackscatter'] *= 0.1
-        self.header['TXBeamWidth'] *= 0.1
-        self.header['TVGCrossover'] *= 0.1
+        super(Data89, self).__init__(datablock, byteswap=byteswap)
         numbeams = self.header[-1]
-        self._read(datablock[hdr_sz:], numbeams)
-    
+
+        self._read(datablock[self.hdr_sz:], numbeams)
+
     def _read(self, datablock, numbeams):
         """
         Reads the data section of the record. Backscatter is stored in one long
@@ -2204,19 +2453,24 @@ class Data89:
         into an array. Note the existance of the beam_position array that
         points to the start of each array.
         """
-        beaminfo_sz = Data89.beaminfo_dtype.itemsize
-        samples_dtype = np.dtype([('Amplitude',"h")])    
-        p = beaminfo_sz*numbeams
-        self.beaminfo = np.frombuffer(datablock[:p],
-            dtype = Data89.beaminfo_dtype)
+        samples_dtype = np.dtype([('Amplitude', "h")])    
+        self.beaminfo_data = Data89_beaminfo(datablock, read_limit=numbeams)
+        self.beaminfo = self.beaminfo_data.header
+        p = Data89_beaminfo.hdr_sz * numbeams
         t = self.beaminfo['#SamplesPerBeam'].sum()
-        samples = np.frombuffer(datablock[p:p+t*samples_dtype.itemsize],
-            dtype = samples_dtype)
-        self.samples = samples.astype(np.float16) # float16 is right type?
-        self.samples *= 0.1
+        self.samples_data = Data89_samples(datablock[p:], read_limit=t)
+        self.samples = self.samples_data.Amplitude
+
         self.beam_position = np.zeros(self.beaminfo['#SamplesPerBeam'].shape, dtype = np.uint32)
         for n in range(len(self.beam_position)-1):
             self.beam_position[n+1] = self.beaminfo['#SamplesPerBeam'][n] + self.beam_position[n]
+
+    def get_datablock(self, data=None):
+        # FIXME: Not sure what happens if reshape is called
+        part1 = super(Data89, self).get_datablock()
+        part2 = self.beaminfo_data.get_datablock()
+        part3 = self.samples_data.get_datablock()
+        return part1 + part2 + part3
 
     def reshape(self):
         """
@@ -2244,7 +2498,7 @@ class Data89:
                 start = centerpos - top[n]
                 self.samplearray[start:start+t[n],n] = beamsamples[::s[n]]
         return self.samplearray, centerpos
-        
+
     def center(self):
         """
         Returns the center sample, which is at the bottom detection.
@@ -2257,9 +2511,9 @@ class Data89:
         center = self.samples[idx]
         sidx = np.nonzero(self.beaminfo['SortingDirection'] == -1)[0]
         idx = self.beam_position[sidx + 1] - self.beaminfo['CenterSample#'][sidx]
-        center[sidx] = self.samples[idx]        
+        center[sidx] = self.samples[idx]
         return center
-        
+
     def plot(self):
         """
         Plots the output from the "center" method.
@@ -2272,201 +2526,211 @@ class Data89:
         plt.imshow(data, aspect = 'auto', cmap = 'gray', interpolation = 'none')
         plt.clim((-80,0))
 
-        
-    def display(self):
-        """
-        Displays contents of the header to the command window.
-        """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
-            
-            
-class Data102:
+
+class Data102_nrx(BaseData):
+    hdr_dtype = np.dtype([('BeamPointingAngle', "f"), ('Range', "f"),
+        ('TransmitSectorID', 'B'), ('Reflectivity', "f"), ('QualityFactor', 'B'),
+        ('DetectionWindowLength', 'B'), ('BeamNumber', 'h'), ('Spare', 'H')])
+    raw_dtype = np.dtype([('BeamPointingAngle', "h"), ('Range', "H"),
+        ('TransmitSectorID', 'B'), ('Reflectivity', "b"), ('QualityFactor', 'B'),
+        ('DetectionWindowLength', 'B'), ('BeamNumber', 'h'), ('Spare', 'H')])
+    conversions = {'BeamPointingAngle': 0.01, 'Range': 0.25, 'Reflectivity': 0.5}
+
+    def __init__(self, datablock, byteswap=False, read_limit=None):
+        super(Data102_nrx, self).__init__(datablock, byteswap=byteswap, read_limit=read_limit)  # read as many records as passed in
+
+
+class Data102_ntx(BaseData):
+    hdr_dtype = np.dtype([('TiltAngle', "f"), ('FocusRange', "f"),
+        ('SignalLength', "f"), ('Delay', "f"),
+        ('CenterFrequency', 'I'), ('Bandwidth', "I"), ('SignalWaveformID', 'B'),
+        ('TransmitSector#', 'B')])
+    raw_dtype = np.dtype([('TiltAngle', "h"), ('FocusRange', "H"),
+        ('SignalLength', "I"), ('Delay', "I"),
+        ('CenterFrequency', 'I'), ('Bandwidth', "H"), ('SignalWaveformID', 'B'),
+        ('TransmitSector#', 'B')])
+    conversions = {'TiltAngle': 0.01, 'FocusRange': 0.1,
+                   'SignalLength': 10**-6, 'Delay': 10**-6,
+                   'Bandwidth': 10}
+
+    def __init__(self, datablock, byteswap=False, read_limit=None):
+        super(Data102_ntx, self).__init__(datablock, byteswap=byteswap, read_limit=read_limit)  # read as many records as passed in
+
+
+class Data102(BaseData):
     """
     Range and angle datagram, 66h / 102 / 'f'.  All values are converted to
     whole units, meaning meters, seconds, degrees, Hz, etc.
     """
-    hdr_dtype = np.dtype([('PingCounter','H'),('SystemSerial#','H'),
-        ('Ntx','H'),('Nrx','H'),('SamplingFrequency',"f"),('Depth',"f"),
-        ('SoundSpeed',"f"),('MaximumBeams','H'),('Spare1','H'),('Spare2','H')])
-    ntx_dtype = np.dtype([('TiltAngle',"f"),('FocusRange',"f"),
-        ('SignalLength',"f"),('Delay',"f"),
-        ('CenterFrequency','I'),('Bandwidth',"I"),('SignalWaveformID','B'),
-        ('TransmitSector#','B')])
-    nrx_dtype = np.dtype([('BeamPointingAngle',"f"),('Range',"f"),
-        ('TransmitSectorID','B'),('Reflectivity',"f"),('QualityFactor','B'),
-        ('DetectionWindowLength','B'),('BeamNumber','h'),('Spare','H')])
-   
+    hdr_dtype = np.dtype([('PingCounter', 'H'), ('SystemSerial#', 'H'),
+        ('Ntx', 'H'), ('Nrx', 'H'), ('SamplingFrequency', "f"), ('Depth', "f"),
+        ('SoundSpeed', "f"), ('MaximumBeams', 'H'), ('Spare1', 'H'), ('Spare2', 'H')])
+    raw_dtype = np.dtype([('PingCounter', 'H'), ('SystemSerial#', 'H'),
+        ('Ntx', 'H'), ('Nrx', 'H'), ('SamplingFrequency', "I"), ('Depth', "i"),
+        ('SoundSpeed', "H"), ('MaximumBeams', 'H'), ('Spare1', 'H'),
+        ('Spare2', 'H')])
+    conversions = {'SoundSpeed': 0.1, 'SamplingFrequency': 0.01, 'Depth': 0.01}
+
     def __init__(self, datablock, byteswap = False):
         """
         Catches the binary datablock and decodes the first section and calls
         the decoder for the rest of the record.
         """
-        hdr_dtype = np.dtype([('PingCounter','H'),('SystemSerial#','H'),
-            ('Ntx','H'),('Nrx','H'),('SamplingFrequency',"I"),('Depth',"i"),
-            ('SoundSpeed',"H"),('MaximumBeams','H'),('Spare1','H'),
-            ('Spare2','H')])
-        hdr_sz = hdr_dtype.itemsize
-        self.header = np.frombuffer(datablock[:hdr_sz], dtype = hdr_dtype)[0]
-        self.header = self.header.astype(Data102.hdr_dtype)
-        self.header['SoundSpeed'] *= 0.1
-        self.header['SamplingFrequency'] *= 0.01
-        self.header['Depth'] *= 0.01
-        self.read(datablock[hdr_sz:-1])
+        super(Data102, self).__init__(datablock, byteswap=byteswap)
+
+        self.read(datablock[self.hdr_sz:-1])
 
     def read(self, datablock):
         """
         Reads the data section of the record and converts values to whole
         units.
         """
-        # declare ntx stuff
-        ntx_dtype = np.dtype([('TiltAngle',"h"),('FocusRange',"H"),
-            ('SignalLength',"I"),('Delay',"I"),
-            ('CenterFrequency','I'),('Bandwidth',"H"),('SignalWaveformID','B'),
-            ('TransmitSector#','B')])
-        ntx_sz = ntx_dtype.itemsize
         ntx = self.header['Ntx']
-        # declare nrx stuff
-        nrx_dtype = np.dtype([('BeamPointingAngle',"h"),('Range',"H"),
-            ('TransmitSectorID','B'),('Reflectivity',"b"),('QualityFactor','B'),
-            ('DetectionWindowLength','B'),('BeamNumber','h'),('Spare','H')])
-        nrx_sz = nrx_dtype.itemsize
         nrx = self.header['Nrx']
         # read ntx
-        self.tx = np.frombuffer(datablock[:ntx * ntx_sz], 
-            dtype = ntx_dtype)
-        self.tx = self.tx.astype(Data102.ntx_dtype)
-        self.tx['TiltAngle'] *= 0.01
-        self.tx['FocusRange'] *= 0.1
-        self.tx['SignalLength'] *= 10**-6
-        self.tx['Delay'] *= 10**-6
-        self.tx['Bandwidth'] *= 10
-        # read nrx
-        self.rx = np.frombuffer(datablock[ntx * ntx_sz:], dtype = nrx_dtype)
-        self.rx = self.rx.astype(Data102.nrx_dtype)
-        self.rx['BeamPointingAngle'] *= 0.01
-        self.rx['Range'] *= 0.25
-        self.rx['Reflectivity'] *= 0.5
-        
-    def display(self):
-        """
-        Displays contents of the header to the command window.
-        """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
-        
-class Data104:
+        self.tx_data = Data102_ntx(datablock, read_limit=ntx)
+        self.tx = self.tx_data.header  # maintain backward compatibility
+
+        # read nrx -- skip over the tx data in the block
+        self.rx_data = Data102_nrx(datablock[ntx * self.tx_data.hdr_sz:], read_limit=nrx)
+        self.rx = self.rx_data.header  # maintain backward compatibility
+
+    def get_datablock(self, data=None):
+        # FIXME: Not sure what happens if TVG was removed
+        part1 = super(Data102, self).get_datablock()
+        part2 = self.tx_data.get_datablock()
+        part3 = self.rx_data.get_datablock()
+        return part1 + part2 + part3
+
+
+class Data104(BaseData):
     """
     Depth (pressure) or height datagram, 0x68h / 'h' / 104.  Height information
     is converted to meters.
     """
-    
-    hdr_dtype = np.dtype([('Counter','H'),('SystemSerial#','H'),
-        ('Height',"f"),('HeightType','B')])
-    
+    hdr_dtype = np.dtype([('Counter', 'H'), ('SystemSerial#', 'H'),
+        ('Height', "f"), ('HeightType', 'B')])
+    raw_dtype = np.dtype([('Counter', 'H'), ('SystemSerial#', 'H'),
+        ('Height', "i"), ('HeightType', 'B')])
+    conversions = {'Height': 0.01}
+
+
     def __init__(self, datablock, byteswap = False):
         """Catches the binary datablock and decodes the record."""
-        hdr_dtype = np.dtype([('Counter','H'),('SystemSerial#','H'),
-            ('Height',"i"),('HeightType','B')])
-        self.header = np.frombuffer(datablock, dtype = hdr_dtype)[0]
-        self.header = self.header.astype(Data104.hdr_dtype)
-        self.header['Height'] = 0.01 * self.header['Height']
-        
-    def display(self):
-        """
-        Displays contents of the header to the command window.
-        """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
-            
-class Data107:
-    """
-    The water column datagram, 6Bh / 107d / 'k'.  The receiver beams are roll
-    stabilized.  Units have been shifted to whole units as in hertz, meters, 
-    seconds, etc.  Watercolumn data is in ampdata as 0.5 dB steps.
-    """
-    hdr_dtype = np.dtype([('PingCounter','H'),('SystemSerial#','H'),
-        ('#OfDatagrams','H'),('Datagram#','H'),('#TxSectors','H'),
-        ('Total#Beams','H'),('NumberBeamsInDatagram','H'),('SoundSpeed',"f"),
-        ('SamplingFrequency',"d"),('TxHeave',"f"),('TVGfunction','B'),
-        ('TVGoffset','b'),('ScanningInfo','B'),('Spare','3B')])
-    ntx_dtype = np.dtype([('TiltTx',"f"),('CenterFrequency',"I"),
-        ('TransmitSector#','B'),('Spare','B')])
-    nrx_dtype = np.dtype([('BeamPointingAngle',"f"),('StartRangeSample#','H'),
-        ('NumberSamples','H'),('DetectedRange','H'),('TransmitSector#','B'),
-        ('Beam#','B')])
-        
-    def __init__(self, datablock, byteswap = False):
-        """
-        Catches the binary datablock and decodes the first section and calls
-        the decoder for the rest of the record.
-        """
-        hdr_dtype = np.dtype([('PingCounter','H'),('SystemSerial#','H'),
-            ('#OfDatagrams','H'),('Datagram#','H'),('#TxSectors','H'),
-            ('Total#Beams','H'),('NumberBeamsInDatagram','H'),('SoundSpeed',"H"),
-            ('SamplingFrequency',"I"),('TxHeave',"h"),('TVGfunction','B'),
-            ('TVGoffset','b'),('ScanningInfo','B'),('Spare','3B')])
-        hdr_sz = hdr_dtype.itemsize
-        self.header = np.frombuffer(datablock[:hdr_sz], dtype = hdr_dtype)[0]
-        self.header = self.header.astype(Data107.hdr_dtype)
-        self.header['SoundSpeed'] *= 0.1
-        self.header['SamplingFrequency'] *= 0.01
-        self.header['TxHeave'] *= 0.01
-        self.read(datablock[hdr_sz:])
-        self.hasTVG = True
-        
-    def read(self, datablock):
-        """
-        Reads the variable section of the datagram.
-        """
-        # declare tx stuff
-        ntx_dtype = np.dtype([('TiltTx',"h"),('CenterFrequency',"H"),
-            ('TransmitSector#','B'),('Spare','B')])
-        ntx_sz = ntx_dtype.itemsize    
-        ntx = self.header[4]
+        super(Data104, self).__init__(datablock, byteswap=byteswap)
+
+class Data107_nrx(BaseData):
+    """This class is a bit different since the data is intertwined.  The datagrams 
+    are written header followed by samples where the number of samples is in the header."""
+    hdr_dtype = np.dtype([('BeamPointingAngle', "f"), ('StartRangeSample#', 'H'),
+        ('NumberSamples', 'H'), ('DetectedRange', 'H'), ('TransmitSector#', 'B'),
+        ('Beam#', 'B')])
+    raw_dtype = np.dtype([('BeamPointingAngle', "h"),
+        ('StartRangeSample#', 'H'), ('NumberSamples', 'H'),
+        ('DetectedRange', 'H'), ('TransmitSector#', 'B'),
+        ('Beam#', 'B')])
+
+    def __init__(self, datablock, byteswap=False, read_limit=None):
         # declare rx stuff
-        nrx_dtype = np.dtype([('BeamPointingAngle',"h"),
-            ('StartRangeSample#','H'),('NumberSamples','H'),
-            ('DetectedRange','H'),('TransmitSector#','B'),
-            ('Beam#','B')])
-        nrx_sz = nrx_dtype.itemsize
-        nrx = self.header[6]
-        self.rx = np.zeros(nrx, dtype = nrx_dtype)
+        if read_limit is None:
+            raise Exception("Must specify a number of rx datagrams to read")
+        p = 0  # pointer to where we are in the datablock
+        nrx_sz = self.hdr_size
+        nrx = read_limit
+        self.header = np.zeros(nrx, dtype=self.raw_dtype)
+
         # declare amplitudes stuff
-        numamp = len(datablock) - ntx_sz * ntx - nrx_sz * nrx
-        amp_dtype = np.dtype([('SampleAmplitude',"b")])
+        amp_dtype = np.dtype([('SampleAmplitude', "b")])
+        numamp = len(datablock) - nrx_sz * nrx  # figures out the total number of amplitudes in the datablock
         # Initialize array to NANs. Source:http://stackoverflow.com/a/1704853/1982894
-        tempamp = np.empty(numamp, dtype = amp_dtype)
+        tempamp = np.empty(numamp, dtype=amp_dtype)
         tempamp[:] = np.NAN
-        # get the tx data
-        self.tx = np.frombuffer(datablock[:ntx*ntx_sz], dtype = ntx_dtype)
-        p = ntx*ntx_sz
-        self.tx = self.tx.astype(Data107.ntx_dtype)
-        self.tx['TiltTx'] *= 0.01
-        self.tx['CenterFrequency'] *= 10
         # get the rx and amplitude data
         pamp = 0
         for n in range(nrx):
-            self.rx[n] = np.frombuffer(datablock[p:p+nrx_sz], 
-                dtype = nrx_dtype)
+            self.header[n] = np.frombuffer(datablock[p:p + nrx_sz], dtype=self.raw_dtype)
             p += nrx_sz
             # the number of samples for this beam
-            beamsz = self.rx[n][2]
-            tempamp[pamp:pamp+beamsz] = \
-                np.frombuffer(datablock[p:p+beamsz], dtype = amp_dtype)
+            beamsz = self.header[n][2]
+            tempamp[pamp:pamp + beamsz] = np.frombuffer(datablock[p:p + beamsz], dtype=amp_dtype)
             p += beamsz
             pamp += beamsz
-        self.rx = self.rx.astype(Data107.nrx_dtype)
-        self.rx['BeamPointingAngle'] *= 0.01
+        self.header = self.header.astype(self.hdr_dtype)
+        self.header['BeamPointingAngle'] *= 0.01
         # unwined the beam data into an array
-        numsamples = self.rx['NumberSamples']
+        numsamples = self.header['NumberSamples']
         self.ampdata = np.empty((numsamples.max(), nrx), dtype = np.float32)
         self.ampdata[:] = np.NAN
         pamp = 0
         for n in range(nrx):
             self.ampdata[:numsamples[n],n] = 0.5*tempamp[pamp:pamp+numsamples[n]].astype(np.float32)
             pamp += numsamples[n]
-            
+
+    def get_datablock(self, data=None):
+        raise Exception("Not implemented")
+
+
+class Data107_ntx(BaseData):
+    hdr_dtype = np.dtype([('TiltTx', "f"), ('CenterFrequency', "I"),
+        ('TransmitSector#', 'B'), ('Spare', 'B')])
+    raw_dtype = np.dtype([('TiltTx', "h"), ('CenterFrequency', "H"),
+        ('TransmitSector#', 'B'), ('Spare', 'B')])
+    conversions = {'TiltTx': 0.01, 'CenterFrequency': 10}
+
+    def __init__(self, datablock, byteswap=False, read_limit=None):
+        super(Data107_ntx, self).__init__(datablock, byteswap=byteswap, read_limit=read_limit)  # read as many records as passed in
+
+
+class Data107(BaseData):
+    """
+    The water column datagram, 6Bh / 107d / 'k'.  The receiver beams are roll
+    stabilized.  Units have been shifted to whole units as in hertz, meters, 
+    seconds, etc.  Watercolumn data is in ampdata as 0.5 dB steps.
+    """
+    hdr_dtype = np.dtype([('PingCounter', 'H'), ('SystemSerial#', 'H'),
+        ('#OfDatagrams', 'H'), ('Datagram#', 'H'), ('#TxSectors', 'H'),
+        ('Total#Beams', 'H'), ('NumberBeamsInDatagram', 'H'), ('SoundSpeed', "f"),
+        ('SamplingFrequency', "d"), ('TxHeave', "f"), ('TVGfunction', 'B'),
+        ('TVGoffset', 'b'), ('ScanningInfo', 'B'), ('Spare', '3B')])
+    raw_dtype = np.dtype([('PingCounter', 'H'), ('SystemSerial#', 'H'),
+        ('#OfDatagrams', 'H'), ('Datagram#', 'H'), ('#TxSectors', 'H'),
+        ('Total#Beams', 'H'), ('NumberBeamsInDatagram', 'H'), ('SoundSpeed', "H"),
+        ('SamplingFrequency', "I"), ('TxHeave', "h"), ('TVGfunction', 'B'),
+        ('TVGoffset', 'b'), ('ScanningInfo', 'B'), ('Spare', '3B')])
+    conversions = {'SoundSpeed': 0.1, 'SamplingFrequency': 0.01, 'TxHeave': 0.01}
+
+    def __init__(self, datablock, byteswap=False):
+        """
+        Catches the binary datablock and decodes the first section and calls
+        the decoder for the rest of the record.
+        """
+        super(Data107, self).__init__(datablock, byteswap=byteswap)
+        self.hasTVG = True
+
+        self.read(datablock[self.hdr_sz:])
+
+    def read(self, datablock):
+        """
+        Reads the variable section of the datagram.
+        """
+        # declare tx stuff
+        ntx = self.header[4]
+        # get the tx data
+        self.tx_data = Data107_ntx(datablock, read_limit=ntx)
+        self.tx = self.tx_data.header
+        p = ntx * self.tx_data.hdr_sz
+        nrx = self.header[6]
+        self.rx_data = Data107_nrx(datablock[p:], read_limit=nrx)
+        self.rx = self.rx_data.header
+        self.ampdata = self.rx_data.ampdata
+
+    def get_datablock(self, data=None):
+        # FIXME: Not sure what happens if TVG was removed
+        part1 = super(Data107, self).get_datablock()
+        part2 = self.tx_data.get_datablock()
+        part3 = self.rx_data.get_datablock()
+        return part1 + part2 + part3
+
     def deTVG(self, absorption, OFS, usec = True):
         """
         Removes the TVG function from the ampdata.  The TVG will be removed
@@ -2475,7 +2739,7 @@ class Data107:
         The TVG function removed (from the datagram definition) is
         func_TVG = X * log(R) + 2 * Absorption * R + OFS + C
         Set the kwarg 'usec' to False to avoid applying the header c value.
-        
+
         Absorption should be supplied in dB / m.
         """
         x = self.header['TVGfunction']
@@ -2491,22 +2755,13 @@ class Data107:
         f.shape = (len(f), -1)
         self.ampdata -= f
         self.hasTVG = False
-        
-    def display(self):
-        """
-        Displays contents of the header to the command window.
-        """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
-        
+
     def plot(self):
         """
         Plots the watercolumn data.
         """
         a = self.rx['BeamPointingAngle']
-        s = self.header['SoundSpeed']
-        dt = self.header['SamplingFrequency']
-        r = np.arange(len(self.ampdata)) * s / (2 * dt)
+        r = np.arange(len(self.ampdata))
         A,R = np.meshgrid(a,r)
         # swap sides through -1 to make the negative angle be the positive direction
         X = -1*R * np.sin(np.deg2rad(A))
@@ -2523,38 +2778,34 @@ class Data107:
         im.set_clim((cmean-3*cstd, cmean+3*cstd))
         plt.grid()
         plt.draw()
-        
-class Data109:
+
+
+class Data109(BaseData):
     """
     The Stave Data Datagram, 6Dh / 109d / 'm'.  This data definition does not
     exist in the normal documentation.  All values are converted to whole
     units.
     """
-    
-    hdr_dtype = np.dtype([('PingCounter','H'),('SystemSerial#','H'),
-        ('#Datagrams','H'),('Datagram#','H'),('RxSamplingFrequency',"f"),
-        ('SoundSpeed',"f"),('StartRangeRefTx','H'),('TotalSample','H'),
-        ('#SamplesInDatagram','H'),('Stave#','H'),('#StavesPerSample','H'),
-        ('RangeToNormal','H'),('Spare','H')])
-        
+    hdr_dtype = np.dtype([('PingCounter', 'H'), ('SystemSerial#', 'H'),
+        ('#Datagrams', 'H'), ('Datagram#', 'H'), ('RxSamplingFrequency', "f"),
+        ('SoundSpeed', "f"), ('StartRangeRefTx', 'H'), ('TotalSample', 'H'),
+        ('#SamplesInDatagram', 'H'), ('Stave#', 'H'), ('#StavesPerSample', 'H'),
+        ('RangeToNormal', 'H'), ('Spare', 'H')])
+    raw_dtype = np.dtype([('PingCounter', 'H'), ('SystemSerial#', 'H'),
+        ('#Datagrams', 'H'), ('Datagram#', 'H'), ('RxSamplingFrequency', "I"),
+        ('SoundSpeed', "H"), ('StartRangeRefTx', 'H'), ('TotalSample', 'H'),
+        ('#SamplesInDatagram', 'H'), ('Stave#', 'H'), ('#StavesPerSample', 'H'),
+        ('RangeToNormal', 'H'), ('Spare', 'H')])
+    conversions = {'RxSamplingFrequency': 0.01, 'SoundSpeed': 0.1}
+
     def __init__(self, datablock, byteswap = False):
         """
         Catches the binary datablock and decodes the first section and calls
         the decoder for the rest of the record.
         """
-        hdr_dtype = np.dtype([('PingCounter','H'),('SystemSerial#','H'),
-            ('#Datagrams','H'),('Datagram#','H'),('RxSamplingFrequency',"I"),
-            ('SoundSpeed',"H"),('StartRangeRefTx','H'),('TotalSample','H'),
-            ('#SamplesInDatagram','H'),('Stave#','H'),('#StavesPerSample','H'),
-            ('RangeToNormal','H'),('Spare','H')])
-        hdr_sz = hdr_dtype.itemsize
-        self.header = np.frombuffer(datablock[:hdr_sz],
-            dtype = hdr_dtype)[0]
-        self.header = self.header.astype(Data109.hdr_dtype)
-        self.header['RxSamplingFrequency'] *= 0.01
-        self.header['SoundSpeed'] *= 0.1
-        self.read(datablock[hdr_sz:])
-        
+        super(Data109, self).__init__(datablock, byteswap=byteswap)
+        self.read(datablock[self.hdr_sz:])
+
     def read(self, datablock):
         """
         Reads the data portion of this datablock.  Data formats are defined
@@ -2565,182 +2816,218 @@ class Data109:
         Ne = self.header['#StavesPerSample']
         read_fmt = str(Ne) + 'b'
         used_fmt = str(Ne) + 'f'
-        read_dtype = np.dtype([('Sample#','H'),('TvgGain',"h"),
+        read_dtype = np.dtype([('Sample#', 'H'), ('TvgGain', "h"),
             ('StaveBackscatter',read_fmt)])
+        self._read_dtype = read_dtype 
         read_sz = read_dtype.itemsize
-        used_dtype = np.dtype([('Sample#','H'),('TvgGain',"f"),
+        used_dtype = np.dtype([('Sample#', 'H'), ('TvgGain', "f"),
             ('StaveBackscatter',read_fmt)])
         self.data = np.frombuffer(datablock[:Ns*read_sz],
             dtype = read_dtype)
         self.data = self.data.astype(used_dtype)
         self.data['TvgGain'] *= 0.01
         self.data['StaveBackscatter'] *= 0.5
-        
-    def display(self):
-        """
-        Displays contents of the header to the command window.
-        """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
-        
-        
-class Data110:
-    """
-    The Network Attitiude Datagram, 6Eh / 110d / 'n'.  Data is found in the header
-    and in the 'data' array.  All values are in degrees, and meters.  The raw
-    data is parsed and placed in source_data.
-    """
-    
-    hdr_dtype = np.dtype([('Counter','H'),('Serial#','H'),('NumEntries','H'),
-        ('Sensor','B'),('Spare','B')])
-    att_dtype = np.dtype([('Time','d'),('Roll','f'),('Pitch','f'),('Heave','f'),
-        ('Heading','f'),('NumBytesInput','B')])
-    
-    def __init__(self, datablock, POSIXtime, byteswap = False):
+
+    def get_datablock(self, data=None):
+        part1 = super(Data109, self).get_datablock()
+        tmp_data = self.data.copy()
+        tmp_data['TvgGain'] /= 0.01
+        tmp_data['StaveBackscatter'] /= 0.5
+        tmp_data = self.data.astype(self._read_dtype)
+        part2 = np.getbuffer(tmp_data)
+        return part1 + part2
+
+
+class Data110_grp(BaseData):
+    hdr_dtype = np.dtype([('GroupStart', 'S4'), ('GroupID', 'H'),
+        ('ByteCount', 'H'), ('Time1', 'd'), ('Time2', 'd'),
+        ('DistanceTag', 'd'), ('TimeTypes', 'B'), ('DistanceType', 'B'),
+        ('Latitude', 'd'), ('Longitude', 'd'), ('Altitude', 'd'),
+        ('AlongTrackVelocity', 'f'), ('AcrossTrackVelocity', 'f'),
+        ('DownVelocity', 'f'), ('Roll', 'd'), ('Pitch', 'd'),
+        ('Heading', 'd'), ('WanderAngle', 'd'), ('Heave', 'f'),
+        ('RollRate', 'f'), ('PitchRate', 'f'), ('YawRate', 'f'),
+        ('LongitudinalAcceleration', 'f'), ('TransverseAcceleration', 'f'),
+        ('DownAcceleration', 'f'), ('Pad', 'H'), ('CheckSum', 'H'),
+        ('MessageEnd', 'S2')])
+
+    def __init__(self, datablock, posixtime, byteswap=False, read_limit=None):
+        super(Data110_grp, self).__init__(datablock, byteswap=byteswap, read_limit=read_limit)  # read as many records as passed in
+        self.time = posixtime
+        packettime = dtm.datetime.utcfromtimestamp(posixtime)
+        # subtract 1 because the first day of the year does not start with zero
+        ordinal = packettime.toordinal()
+        dow = packettime.weekday() + 1.
+        if dow == 7:
+            # shift sunday to be start of week.
+            dow = 0
+        # 1970-1-1 is julian day 719163
+        POSIXdays = ordinal - 719163. - dow
+        self.weektime = POSIXdays * 24. * 3600.
+
+
+class Data110_aaq(BaseData):
+    hdr_dtype = np.dtype([('Header1', 'B'), ('Header2', 'B'),
+        ('Seconds', 'i'), ('FracSeconds', 'f'), ('Latitude', 'f'),
+        ('Longitude', 'f'), ('Height', 'f'), ('Heave', 'f'),
+        ('NorthVelocity', 'f'), ('EastVelocity', 'f'),
+        ('DownVelocity', 'f'), ('Roll', 'f'), ('Pitch', 'f'),
+        ('Heading', 'f'), ('RollRate', 'f'), ('PitchRate', 'f'),
+        ('YawRate', 'f'), ('StatusWord', 'H'), ('CheckSum', 'H')])
+    raw_dtype = np.dtype([('Header1', 'B'), ('Header2', 'B'),
+        ('Seconds', '>i'), ('FracSeconds', '>H'), ('Latitude', '>i'),
+        ('Longitude', '>i'), ('Height', '>i'), ('Heave', '>h'),
+        ('NorthVelocity', '>h'), ('EastVelocity', '>h'),
+        ('DownVelocity', '>h'), ('Roll', '>h'), ('Pitch', '>h'),
+        ('Heading', '>H'), ('RollRate', '>h'), ('PitchRate', '>h'),
+        ('YawRate', '>h'), ('StatusWord', '>H'), ('CheckSum', '>H')])
+    conversions = {'FracSeconds': 0.0001, 'Latitude': 90. / 2**30, 'Longitude': 90. / 2**30,
+                   'Height': 0.01, 'Heave': 0.01, 'NorthVelocity': 0.01, 'EastVelocity': 0.01,
+                   'DownVelocity': 0.01, 'Roll': 90. / 2**14, 'Pitch': 90. / 2**14,
+                   'Heading': 90. / 2**14, 'RollRate': 90. / 2**14,
+                   'PitchRate': 90. / 2**14, 'YawRate': 90. / 2**14}
+
+    def __init__(self, datablock, posixtime, byteswap=False, read_limit=None):
+        super(Data110_aaq, self).__init__(datablock, byteswap=byteswap, read_limit=read_limit)  # read as many records as passed in
+
+
+class Data110_q42(BaseData):
+    hdr_dtype = np.dtype([('Header', 'S1'),
+        ('Seconds', 'i'), ('FracSeconds', 'f'), ('Latitude', 'f'),
+        ('Longitude', 'f'), ('Height', 'f'), ('Heave', 'f'),
+        ('NorthVelocity', 'f'), ('EastVelocity', 'f'),
+        ('DownVelocity', 'f'), ('Roll', 'f'), ('Pitch', 'f'),
+        ('Heading', 'f'), ('RollRate', 'f'), ('PitchRate', 'f'),
+        ('YawRate', 'f'), ('StatusWord', 'H'), ('CheckSum', 'H')])
+    raw_dtype = np.dtype([('Header', 'S1'),
+        ('Seconds', '>i'), ('FracSeconds', '>B'), ('Latitude', '>i'),
+        ('Longitude', '>i'), ('Height', '>i'), ('Heave', '>h'),
+        ('NorthVelocity', '>h'), ('EastVelocity', '>h'),
+        ('DownVelocity', '>h'), ('Roll', '>h'), ('Pitch', '>h'),
+        ('Heading', '>H'), ('RollRate', '>h'), ('PitchRate', '>h'),
+        ('YawRate', '>h'), ('StatusWord', '>H'), ('CheckSum', '>H')])
+    conversions = {'FracSeconds': 0.01, 'Latitude': 90. / 2**30, 'Longitude': 90. / 2**30,
+                   'Height': 0.01, 'Heave': 0.01, 'NorthVelocity': 0.01, 'EastVelocity': 0.01,
+                   'DownVelocity': 0.01, 'Roll': 90. / 2**14, 'Pitch': 90. / 2**14,
+                   'Heading': 90. / 2**14, 'RollRate': 90. / 2**14,
+                   'PitchRate': 90. / 2**14, 'YawRate': 90. / 2**14}
+
+    def __init__(self, datablock, posixtime, byteswap=False, read_limit=None):
+        super(Data110_q42, self).__init__(datablock, byteswap=byteswap, read_limit=read_limit)  # read as many records as passed in
+
+class Data110_att(BaseData):
+    hdr_dtype = np.dtype([('Time', 'd'), ('Roll', 'f'), ('Pitch', 'f'), ('Heave', 'f'),
+        ('Heading', 'f'), ('NumBytesInput', 'B')])
+    raw_dtype = np.dtype([('Time', 'H'), ('Roll', 'h'), ('Pitch', 'h'), ('Heave', 'h'),
+        ('Heading', 'H'), ('NumBytesInput', 'B')])
+
+    def __init__(self, datablock, posixtime, byteswap=False, read_limit=None):
         """Catches the binary datablock and decodes the first section and calls
         the decoder for the rest of the record."""
-        hdr_sz = Data110.hdr_dtype.itemsize
-        self.time = POSIXtime
-        self.header = np.frombuffer(datablock[:hdr_sz], dtype = Data110.hdr_dtype)[0]
-        self.read(datablock[hdr_sz:])
-        
-    def read(self, datablock):
-        """Reads the data section of the record.  Time is POSIX time,
-        angles are in degrees, distances in meters."""
-        att_file_dtype = np.dtype([('Time','H'),('Roll','h'),('Pitch','h'),('Heave','h'),
-            ('Heading','H'),('NumBytesInput','B')])
-        att_sz = att_file_dtype.itemsize
-        self.numrecords = self.header[2]
-        raw_data_size = len(datablock) / self.numrecords - att_sz
-        raw_data_dtype = np.dtype([('Raw','S' + str(raw_data_size))])
-        read_dtype = np.dtype([('Proc', att_file_dtype),('Raw', raw_data_dtype)])
-        temp = np.frombuffer(datablock[:self.numrecords * read_dtype.itemsize], dtype = read_dtype)
-        self.data = temp['Proc'].astype(Data110.att_dtype)
-        self._parse_raw(temp['Raw'])
+        if read_limit is None:
+            raise Exception("read_limit can not be None for Data110_att")
+        raw_data_size = len(datablock) / read_limit - self.hdr_sz
+        raw_data_dtype = np.dtype([('Raw', 'S' + str(raw_data_size))])
+        combined_dtype = np.dtype([('Proc', Data110_att.raw_dtype), ('Raw', raw_data_dtype)])
+        temp = np.frombuffer(datablock[:read_limit * combined_dtype.itemsize], dtype=combined_dtype)
+        self.header = temp['Proc'].astype(Data110_att.hdr_dtype)
+        self.posixtime = posixtime
+        self._parse_raw(temp['Raw'], raw_data_size, read_limit)
         # self.data = np.zeros(self.numrecords, dtype = att_file_dtype)
         # datap = 0
         # for i in range(self.numrecords):
             # temp = np.frombuffer(datablock[datap:att_sz+datap],
                 # dtype = att_file_dtype)
             # datap += att_sz + temp['NumBytesInput'][0]
-            # self.data[i] = temp[['Time','Roll','Pitch','Heave', 'Heading']].astype(Data110.att_dtype)
-        self.data['Time'] = self.data['Time'] * 0.001 + self.time
-        self.data['Roll'] *= 0.01
-        self.data['Pitch'] *= 0.01
-        self.data['Heave'] *= 0.01
-        self.data['Heading'] *= 0.01
-        
-    def _parse_raw(self, raw_data):
+            # self.data[i] = temp[['Time', 'Roll', 'Pitch', 'Heave', 'Heading']].astype(Data110.att_dtype)
+        self.header['Time'] = self.header['Time'] * 0.001 + self.posixtime
+        self.header['Roll'] *= 0.01
+        self.header['Pitch'] *= 0.01
+        self.header['Heave'] *= 0.01
+        self.header['Heading'] *= 0.01
+
+    def _parse_raw(self, raw_arrays, raw_data_size, read_limit):
         """
         Parses the raw data that arrived in SIS and puts it in source_data.  If
         the data type is not known source_data is None.
         """
-        if raw_data[0][0][0:4] == '$GRP':
-            source_dtype = np.dtype([('GroupStart','S4'),('GroupID','H'),
-                ('ByteCount','H'),('Time1','d'),('Time2','d'),
-                ('DistanceTag','d'),('TimeTypes','B'),('DistanceType','B'),
-                ('Latitude','d'),('Longitude','d'),('Altitude','d'),
-                ('AlongTrackVelocity','f'),('AcrossTrackVelocity','f'),
-                ('DownVelocity','f'),('Roll','d'),('Pitch','d'),
-                ('Heading','d'),('WanderAngle','d'),('Heave','f'),
-                ('RollRate','f'),('PitchRate','f'),('YawRate','f'),
-                ('LongitudinalAcceleration','f'),('TransverseAcceleration','f'),
-                ('DownAcceleration','f'),('Pad','H'),('CheckSum','H'),
-                ('MessageEnd','S2')])
-            
-            self.source_data = np.fromiter(raw_data, dtype = source_dtype, count = self.numrecords)
-            packettime = dtm.datetime.utcfromtimestamp(self.time)
-            # subtract 1 because the first day of the year does not start with zero
-            ordinal = packettime.toordinal()
-            dow = packettime.weekday() + 1.
-            if dow == 7:
-                # shift sunday to be start of week.
-                dow = 0
-            # 1970-1-1 is julian day 719163
-            POSIXdays = ordinal - 719163. - dow
-            self._weektime = POSIXdays * 24. * 3600.
+        first_record = raw_arrays[0][0]
+        if first_record[0:4] == '$GRP':
+            datablock = ""
+            for r in raw_arrays:
+                datablock += r[0][:Data110_grp.hdr_sz]
+            self.raw_data = Data110_grp(datablock, self.posixtime, read_limit=read_limit)
+            self.source_data = self.raw_data.header
+            self.weektime = self.raw_data.weektime
             self.source = 'GRP102'
-        elif raw_data[0][0][:2] == '\xaaQ':
-            source_dtype = np.dtype([('Header1','B'),('Header2','B'),
-                ('Seconds','>i'),('FracSeconds','>H'),('Latitude','>i'),
-                ('Longitude','>i'),('Height','>i'),('Heave','>h'),
-                ('NorthVelocity','>h'),('EastVelocity','>h'),
-                ('DownVelocity','>h'),('Roll','>h'),('Pitch','>h'),
-                ('Heading','>H'),('RollRate','>h'),('PitchRate','>h'),
-                ('YawRate','>h'),('StatusWord','>H'),('CheckSum','>H')])
-            source_usetype = np.dtype([('Header1','B'),('Header2','B'),
-                ('Seconds','i'),('FracSeconds','f'),('Latitude','f'),
-                ('Longitude','f'),('Height','f'),('Heave','f'),
-                ('NorthVelocity','f'),('EastVelocity','f'),
-                ('DownVelocity','f'),('Roll','f'),('Pitch','f'),
-                ('Heading','f'),('RollRate','f'),('PitchRate','f'),
-                ('YawRate','f'),('StatusWord','H'),('CheckSum','H')])
-            temp = np.fromiter(raw_data, dtype = source_dtype, count = self.numrecords)
-            self.source_data = temp
-            self.source_data = np.zeros(len(temp), dtype = source_usetype)
-            self.source_data['Header1'] = temp['Header1']
-            self.source_data['Header2'] = temp['Header2']
-            self.source_data['Seconds'] = temp['Seconds']
-            self.source_data['FracSeconds'] = 0.0001 * temp['FracSeconds'].astype(np.float32)
-            self.source_data['Latitude'] = 90. / 2**30 * temp['Latitude'].astype(np.float32)
-            self.source_data['Longitude'] = 90. / 2**30 * temp['Longitude'].astype(np.float32)
-            self.source_data['Height'] = 0.01 * temp['Height'].astype(np.float32)
-            self.source_data['Heave'] = 0.01 * temp['Heave'].astype(np.float32)
-            self.source_data['NorthVelocity'] = 0.01 * temp['NorthVelocity'].astype(np.float32)
-            self.source_data['EastVelocity'] = 0.01 * temp['EastVelocity'].astype(np.float32)
-            self.source_data['DownVelocity'] = 0.01 * temp['DownVelocity'].astype(np.float32)
-            self.source_data['Roll'] = 90. / 2**14 * temp['Roll'].astype(np.float32)
-            self.source_data['Pitch']  = 90. / 2**14 * temp['Pitch'].astype(np.float32)
-            self.source_data['Heading'] = 90. / 2**14 * temp['Heading'].astype(np.float32)
-            self.source_data['RollRate']  = 90. / 2**14 * temp['RollRate'].astype(np.float32)
-            self.source_data['PitchRate']  = 90. / 2**14 * temp['PitchRate'].astype(np.float32)
-            self.source_data['YawRate']  = 90. / 2**14 * temp['YawRate'].astype(np.float32)
+        elif first_record[:2] == '\xaaQ':
+            datablock = ""
+            for r in raw_arrays:
+                datablock += r[0][:Data110_aaq.hdr_sz]
+            self.raw_data = Data110_aaq(datablock, read_limit=read_limit)
+            self.source_data = self.raw_data.header
             self.source = 'binary23'
-        elif raw_data[0][0][0] == 'q' and len(raw_data[0][0]) == 42:
-            source_dtype = np.dtype([('Header','S1'),
-                ('Seconds','>i'),('FracSeconds','>B'),('Latitude','>i'),
-                ('Longitude','>i'),('Height','>i'),('Heave','>h'),
-                ('NorthVelocity','>h'),('EastVelocity','>h'),
-                ('DownVelocity','>h'),('Roll','>h'),('Pitch','>h'),
-                ('Heading','>H'),('RollRate','>h'),('PitchRate','>h'),
-                ('YawRate','>h'),('StatusWord','>H'),('CheckSum','>H')])
-            source_usetype = np.dtype([('Header','S1'),
-                ('Seconds','i'),('FracSeconds','f'),('Latitude','f'),
-                ('Longitude','f'),('Height','f'),('Heave','f'),
-                ('NorthVelocity','f'),('EastVelocity','f'),
-                ('DownVelocity','f'),('Roll','f'),('Pitch','f'),
-                ('Heading','f'),('RollRate','f'),('PitchRate','f'),
-                ('YawRate','f'),('StatusWord','H'),('CheckSum','H')])
-            temp = np.fromiter(raw_data, dtype = source_dtype, count = self.numrecords)
-            self.source_data = np.zeros(len(temp), dtype = source_usetype)
-            self.source_data['Header'] = temp['Header']
-            self.source_data['Seconds'] = temp['Seconds']
-            self.source_data['FracSeconds'] = 0.01 * temp['FracSeconds'].astype(np.float32)
-            self.source_data['Latitude'] = 90. / 2**30 * temp['Latitude'].astype(np.float32)
-            self.source_data['Longitude'] = 90. / 2**30 * temp['Longitude'].astype(np.float32)
-            self.source_data['Height'] = 0.01 * temp['Height'].astype(np.float32)
-            self.source_data['Heave'] = 0.01 * temp['Heave'].astype(np.float32)
-            self.source_data['NorthVelocity'] = 0.01 * temp['NorthVelocity'].astype(np.float32)
-            self.source_data['EastVelocity'] = 0.01 * temp['EastVelocity'].astype(np.float32)
-            self.source_data['DownVelocity'] = 0.01 * temp['DownVelocity'].astype(np.float32)
-            self.source_data['Roll'] = 90. / 2**14 * temp['Roll'].astype(np.float32)
-            self.source_data['Pitch']  = 90. / 2**14 * temp['Pitch'].astype(np.float32)
-            self.source_data['Heading'] = 90. / 2**14 * temp['Heading'].astype(np.float32)
-            self.source_data['RollRate']  = 90. / 2**14 * temp['RollRate'].astype(np.float32)
-            self.source_data['PitchRate']  = 90. / 2**14 * temp['PitchRate'].astype(np.float32)
-            self.source_data['YawRate']  = 90. / 2**14 * temp['YawRate'].astype(np.float32)
+        elif first_record[0] == 'q' and raw_data_size == 42:
+            datablock = ""
+            for r in raw_arrays:
+                datablock += r[0][:Data110_q42.hdr_sz]
+            self.raw_data = Data110_q42(datablock, read_limit=read_limit)
+            self.source_data = self.raw_data.header
             self.source = 'binary11'
         else:
-            self.source_data = raw_data
+            self.source_data = np.getbuffer(np.ascontiguousarray(raw_arrays))
             self.source = 'Unknown'
+
+    def get_datablock(self, data=None):
+        tmp_header = self.header.copy()
+        tmp_header['Time'] = (tmp_header['Time'] + self.posixtime) / 0.001
+        tmp_header['Roll'] /= 0.01
+        tmp_header['Pitch'] /= 0.01
+        tmp_header['Heave'] /= 0.01
+        tmp_header['Heading'] /= 0.01
+        part1 = super(Data110_att, self).get_datablock(tmp_header)
+        raise Exception("Need to put the Proc and Raw packets back together properly.")
         
-    def display(self):
-        """
-        Displays contents of the header to the command window.
-        """
-        for n,name in enumerate(self.header.dtype.names):
-            print name + ' : ' + str(self.header[n])
-            
+        part2 = self.att_data.get_datablock()
+        part3 = self.source_data.get_datablock()
+        return part1 + part2 + str(part3)
+
+
+class Data110(BaseData):
+    """
+    The Network Attitiude Datagram, 6Eh / 110d / 'n'.  Data is found in the header
+    and in the 'data' array.  All values are in degrees, and meters.  The raw
+    data is parsed and placed in source_data.
+    """
+
+    hdr_dtype = np.dtype([('Counter', 'H'), ('Serial#', 'H'), ('NumEntries', 'H'),
+        ('Sensor', 'B'), ('Spare', 'B')])
+
+    def __init__(self, datablock, POSIXtime, byteswap = False):
+        """Catches the binary datablock and decodes the first section and calls
+        the decoder for the rest of the record."""
+        super(Data110, self).__init__(datablock, byteswap=byteswap)
+        self.time = POSIXtime
+        self.read(datablock[self.hdr_sz:])
+
+    def read(self, datablock):
+        """Reads the data section of the record.  Time is POSIX time,
+        angles are in degrees, distances in meters."""
+        self.numrecords = self.header[2]
+        self.att_data = Data110_att(datablock, self.time, read_limit=self.numrecords)
+        #maintain backward compatibility
+        self.data = self.att_data.header  
+        self.source_data = self.att_data.source_data
+        self.source = self.att_data.source
+
+    def get_datablock(self, data=None):
+        part1 = super(Data110, self).get_datablock()
+        part2 = self.att_data.get_datablock()
+        part3 = self.source_data.get_datablock()
+        return part1 + part2 + str(part3)
+
+
+
 class useall(allRead):
     """
     Built as a subclass of the allRead class to perform higher level functions.
@@ -4493,9 +4780,7 @@ def build_BSCorr(fname1, fname2, which_swath = 0, bs_mean = None, plot_bs = True
         outfile.close()
     assert(not debug)
 
-def plot_extinction(fdir = '.', plot_mean = False, plot_lines = True,
-                    modes = [], mindepth = None, maxdepth = None,
-                    maxport = None, maxstbd = None):
+def plot_extinction(fdir = '.', plot_mean = False, plot_lines = True, modes = []):
     """
     extinction_KM.py
     
@@ -4506,6 +4791,7 @@ def plot_extinction(fdir = '.', plot_mean = False, plot_lines = True,
     as a function of acrosstrack vs depth with the the mode as the color.
     
     This function can easily be changed to make the backscatter the color instead.
+    
     """
     flist = glob(fdir + '/*.all') 
     numf = len(flist)
@@ -4682,7 +4968,7 @@ def _build_extinction_curve(depths, across, binsize = 200):
         am.append( np.sum(avals * winvals) / winvals.sum() ) # window and normalize
     return depthstep, am
     
-def noise_from_passive_wc(path = '.', by_file = True, speed_change_rate = 10, speed_bins = [], extension = 'wcd', which_swath = 'all'):
+def noise_from_passive_wc(path = '.', speed_change_rate = 10, speed_bins = [], extension = 'wcd', which_swath = 'all'):
     """
     Builds an array of noise data by averaging the watercolumn from the files
     at the provided path.  The kwarg speed_change_rate defines the number of
@@ -4955,8 +5241,7 @@ def _assign_speed_bins(speeds, speed_bins, diff_from_bin = 0.5):
             used_speeds.append(sb)
     # find the indicies where accelerations were lower.
     return np.array(sb_idx), used_speeds
-
-
+    
 def summarize_directory(directory = '.'):
     """
     Print a summary of all the lines in the directory.
@@ -4976,7 +5261,6 @@ def summarize_directory(directory = '.'):
         return info
     else:
         return None
-<<<<<<< .merge_file_a13720
 
 def plot_all_nav(directory = '.'):
     """
@@ -5024,8 +5308,6 @@ def plot_all_nav(directory = '.'):
         if n >= len(clist):
             n = 0
         plt.draw()
-=======
->>>>>>> .merge_file_a10380
 
 def _checksum_all_bytes(bytes):
     # Calculate checksum by sum of bytes method
