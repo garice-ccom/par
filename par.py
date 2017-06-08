@@ -25,7 +25,7 @@ OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
 ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 
-V0.3.7 20161104
+V0.3.9 20170301
 This module includes a number of different classes and methods for working with
 Kongsberg all files, each of which are intended to serve at least one of three
 purposes.  These are
@@ -209,9 +209,12 @@ class allRead:
                 dsize = self.packet.header[0]
                 time = self.packet.gettime()
                 if dtype == 107:
-                    self.get()
-                    pingcounter = self.packet.subpack.header['PingCounter']
-                    self.map.add(str(dtype), loc, time, dsize, pingcounter)
+                    try:
+                        self.get()
+                        pingcounter = self.packet.subpack.header['PingCounter']
+                        self.map.add(str(dtype), loc, time, dsize, pingcounter)
+                    except:
+                        print "Water column record at " + str(loc) + " skipped."
                 else:
                     self.map.add(str(dtype), loc, time, dsize)
                 current = 100 * loc / self.filelen
@@ -926,7 +929,7 @@ class Datagram:
         elif self.dtype == 67:
             self.subpack = Data67(self.datablock, self.byteswap)
         elif self.dtype == 68:
-            self.subpack = Data68(self.datablock, self.byteswap)
+            self.subpack = Data68(self.datablock, self.header['Model'], self.byteswap)
         elif self.dtype == 71:
             self.subpack = Data71(self.datablock, self.time, self.byteswap)
         elif self.dtype == 73:
@@ -1100,7 +1103,7 @@ class Data51:
     ExtraParameters datagram.
     """
     
-    hdr_dtype = np.dtype([('Counter','H'),('Seriel#','H'),('ContentIdentifier','H')])
+    hdr_dtype = np.dtype([('Counter','H'),('Serial#','H'),('ContentIdentifier','H')])
         
     def __init__(self, datablock, model, byteswap = False):
         """Catches the binary datablock and decodes the first section and calls
@@ -1255,7 +1258,8 @@ class Data51:
         """
         for n,name in enumerate(self.header.dtype.names):
             print name + ' : ' + str(self.header[n])
-        print self.data
+        if self.__dict__.has_key('data'):
+            print self.data
         
 class Data65:
     """
@@ -1266,7 +1270,7 @@ class Data65:
     object in the datablock?
     """
     
-    hdr_dtype = np.dtype([('Counter','H'),('Seriel#','H'),('NumEntries','H')])
+    hdr_dtype = np.dtype([('Counter','H'),('Serial#','H'),('NumEntries','H')])
     att_dtype = np.dtype([('Time','d'),('Status','H'),('Roll','f'),('Pitch','f'),
         ('Heave','f'),('Heading','f')])
         
@@ -1556,7 +1560,7 @@ class Data68:
         ('OneWayRange',"f"),('QualityFactor','B'),
         ('DetectionWindowLength',"f"),('Reflectivity',"f"),('BeamNumber','B')])
         
-    def __init__(self,datablock, byteswap = False):
+    def __init__(self,datablock, model, byteswap = False):
         """
         Catches the binary datablock and decodes the first section and calls
         the decoder for the rest of the record.
@@ -1566,6 +1570,7 @@ class Data68:
             ('MaximumBeams','B'),('ValidBeams','B'),('Zresolution',"B"),
             ('XYresolution',"B"),('SampleRate','H')])
         hdr_sz = hdr_dtype.itemsize
+        self._model = model
         self.header = np.frombuffer(datablock[:hdr_sz], dtype = hdr_dtype)[0]
         self.header = self.header.astype(Data68.hdr_dtype)
         self.header[2] *= 0.01
@@ -1577,13 +1582,16 @@ class Data68:
         self.depthoffsetmultiplier = np.frombuffer(datablock[-1:], dtype = 'b')[0] * 65536
         self.header[4] += self.depthoffsetmultiplier
         self.read(datablock[hdr_sz:-1])
-    
+        
     def read(self, datablock):
         """
         Decodes the repeating data section, and shifts all values into meters,
         degrees, or whole units.
         """
-        xyz_dtype = np.dtype([('Depth',"h"),('AcrossTrack',"h"),('AlongTrack',"h"),
+        decode_depth = "h"
+        if self._model == 300 or self._model == 120:
+            decode_depth = "H"
+        xyz_dtype = np.dtype([('Depth',decode_depth),('AcrossTrack',"h"),('AlongTrack',"h"),
             ('BeamDepressionAngle',"h"),('BeamAzimuthAngle',"H"),
             ('OneWayRange',"H"),('QualityFactor','B'),
             ('DetectionWindowLength',"B"),('Reflectivity',"b"),('BeamNumber','B')])       
@@ -2490,7 +2498,9 @@ class Data107:
         Plots the watercolumn data.
         """
         a = self.rx['BeamPointingAngle']
-        r = np.arange(len(self.ampdata))
+        s = self.header['SoundSpeed']
+        dt = self.header['SamplingFrequency']
+        r = np.arange(len(self.ampdata)) * s / (2 * dt)
         A,R = np.meshgrid(a,r)
         # swap sides through -1 to make the negative angle be the positive direction
         X = -1*R * np.sin(np.deg2rad(A))
@@ -2505,6 +2515,7 @@ class Data107:
         cstd = np.nanstd(self.ampdata)
         cmean = np.nanmean(self.ampdata)
         im.set_clim((cmean-3*cstd, cmean+3*cstd))
+        plt.grid()
         plt.draw()
         
 class Data109:
@@ -2818,12 +2829,12 @@ class useall(allRead):
         info['Filename'] = self.infilename[:27]
         p = self.getrecord(82, 0)
         info['EMModel'] = self.packet.header['Model']
-        info['Mode'] = np.binary_repr(p.header['Mode'])
+        info['Mode'] = np.binary_repr(p.header['Mode'],8)
         info['DualSwath'] = self.is_dual_swath()
-        info['YawAndPitchStabilization'] = np.binary_repr(p.header['YawAndPitchStabilization'])
+        info['YawAndPitchStabilization'] = np.binary_repr(p.header['YawAndPitchStabilization'],8)
         info['AngularLimits'] = np.array([p.header['MaxPortCoverage'],p.header['MaxStarboardCoverage']], dtype = 'u2')
-        info['FilterID2'] = np.binary_repr(p.header['HiLoFrequencyAbsorptionCoeffRatio'])
-        info['ProcessingUnitStatus'] = np.binary_repr(p.header['ProcessingUnitStatus'])
+        info['FilterID2'] = np.binary_repr(p.header['HiLoFrequencyAbsorptionCoeffRatio'],8)
+        info['ProcessingUnitStatus'] = np.binary_repr(p.header['ProcessingUnitStatus'],8)
         self._build_speed_array()
         info['Speed'] = np.array([np.nanmean(self.speedarray[:,1]),np.nanstd(self.speedarray[:,1])])
         att = self.navarray['65']
@@ -2905,7 +2916,20 @@ class useall(allRead):
             txdelay = p78.tx['Delay'].astype(np.float64)
             txtime[n,:] = p78.pingtime + txdelay
             k += step
-            
+        
+        print 'getting motion,',
+        # get all the attitude information
+        att = self.navarray['65']
+        attvel = self.navarray['110'] # this comes from the POS102 datagram inside the attitude
+        # gettting this information for all times but by sector
+        for n in range(numtx):
+            txpitch[:,n] = np.interp(txtime[:,n], att[:,0], att[:,1], left = np.nan, right = np.nan)
+            txpitchvel[:,n] = np.interp(txtime[:,n], attvel[:,0], attvel[:,7], left = np.nan, right = np.nan)
+        for n in range(numrx):
+            rxroll[:,n] = np.interp(rxtime[:,n], att[:,0], att[:,1], left = np.nan, right = np.nan)
+            rxrollvel[:,n] = np.interp(rxtime[:,n], attvel[:,0], attvel[:,6], left = np.nan, right = np.nan)
+        recheavevel = np.interp(rectime, attvel[:,0], attvel[:,-1], left = np.nan, right = np.nan)
+
         # get the height data if available
         if self.navarray.has_key('104'):
             rawheight = self.navarray['104']
@@ -2916,8 +2940,12 @@ class useall(allRead):
             p88 = self.getrecord(88,k)
             if use_height and self.navarray.has_key('104'):
                 # using the txtime from the first sector for heave!!!
+                x_arm = float(ip.settings['S1X'])
+                y_arm = float(ip.settings['S1Y'])
+                txroll = np.interp(txtime[n,0], att[:,0], att[:,1], left = np.nan, right = np.nan)
+                induced_heave = x_arm * sin(np.deg2rad(txpitch[n,0])) + y_arm * sin(np.deg2rad(txroll))
                 height = np.interp(txtime[n,0], rawheight[:,0], rawheight[:,1], left = np.nan, right = np.nan)
-                depth88[n,:] = p88.data['Depth'] - height
+                depth88[n,:] = p88.data['Depth'] - height - induced_heave
             else:
                 txheave[n] = p88.header['TransmitDepth'] + wline
                 depth88[n,:] = p88.data['Depth'] + txheave[n]
@@ -2935,21 +2963,7 @@ class useall(allRead):
                 print '\n***Warning: Delayed Heave is not applied since it is not in correct time range for all file.***'
         txheave += dh
         dh.shape = (-1,1)
-        
-        print 'getting motion,',
-        # get all the attitude information
-        att = self.navarray['65']
-        attvel = self.navarray['110'] # this comes from the POS102 datagram inside the attitude
-        # gettting this information for all times but by sector
-        for n in range(numtx):
-            txpitch[:,n] = np.interp(rxtime[:,n], att[:,0], att[:,1], left = np.nan, right = np.nan)
-            txpitchvel[:,n] = np.interp(rxtime[:,n], attvel[:,0], attvel[:,7], left = np.nan, right = np.nan)
-        for n in range(numrx):
-            rxroll[:,n] = np.interp(rxtime[:,n], att[:,0], att[:,1], left = np.nan, right = np.nan)
-            rxrollvel[:,n] = np.interp(rxtime[:,n], attvel[:,0], attvel[:,6], left = np.nan, right = np.nan)
-        recheavevel = np.interp(rectime, attvel[:,0], attvel[:,-1], left = np.nan, right = np.nan)
 
-        
         # get the water column data if available
         if self.map.packdir.has_key('107'):
             # assuming the same number of XYZ88 and water column records...
@@ -3119,11 +3133,13 @@ class useall(allRead):
         # plot scatter plots
         self._plot_wobble_scatter(rxrollvel[:,numrx/2], mainswath_slope, title = 'Roll Rate vs Swath Slope')
         self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,0], title = 'Roll Rate vs Sector 0 Slope')
-        self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,1], title = 'Roll Rate vs Sector 1 Slope')
-        self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,2], title = 'Roll Rate vs Sector 2 Slope')
+        #self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,1], title = 'Roll Rate vs Sector 1 Slope')
+        #self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,2], title = 'Roll Rate vs Sector 2 Slope')
 #        self._plot_wobble_scatter(rxrollvel[:,numrx/2], sector_slope[:,7], title = 'Roll Rate vs Sector 7 Slope')
-#        self._plot_wobble_scatter(recheavevel, swath_mean, title = 'Heave Rate vs Swath Mean')
+        #self._plot_wobble_scatter(recheavevel, swath_mean, title = 'Heave Rate vs Swath Mean')
+        #self._plot_wobble_scatter(txheave, swath_mean, title = 'Heave vs Swath Mean')
 #        self._plot_wobble_scatter(txpitchvel[:,1], swath_mean, title = 'Pitch Rate vs Swath Mean')
+#        self._plot_wobble_scatter(txpitch, swath_mean, title = 'Pitch vs Swath Mean')
 
         # plot the along track fits
         beams = np.arange(numrx)
@@ -3159,14 +3175,14 @@ class useall(allRead):
         # working around nan values for the fit
         idx = np.nonzero(~np.isnan(data2[name2]))[0]
         if fit:
-             result= np.polyfit(data1[name1][idx], data2[name2][idx],1)
+             result, covarmat= np.polyfit(data1[name1][idx], data2[name2][idx], 1, cov = True)
              linefunc = np.poly1d(result)
              xmin = data1[name1].min()
              xmax = data1[name1].max()
              xdata = np.array([xmin,xmax])
              ydata = linefunc(xdata)
              plt.plot(xdata,ydata,'g-')
-             s = 'Slope: %0.2e' %result[0]
+             s = 'Slope: {:0.2e} +/- {:0.2e}'.format(result[0],np.sqrt(covarmat[0,0]))
              title = title + '\n' + s
              if txid is not None:
                  # dealing with the beams that switch sectors
@@ -3207,7 +3223,7 @@ class useall(allRead):
         plt.title(title)
         plt.draw()
         
-    def build_bathymetry(self):
+    def build_bathymetry(self, apply_tx_depth = True):
         """
         Build and return a numpings by numbeams by 3 array of the xyz88
         depths, acrosstrack and alongtrack offsets.  The transmit depth
@@ -3219,7 +3235,10 @@ class useall(allRead):
         vals = np.zeros((num88,numbeams,3))
         for n in np.arange(num88):
             d = self.getrecord(88,n)
-            vals[n,:,0] = d.data['Depth'] + d.header['TransmitDepth']
+            if apply_tx_depth:
+                vals[n,:,0] = d.data['Depth'] + d.header['TransmitDepth']
+            else:
+                vals[n,:,0] = d.data['Depth']
             vals[n,:,1] = d.data['AcrossTrack']
             vals[n,:,2] = d.data['AlongTrack']
         return vals
@@ -3919,6 +3938,7 @@ class mappack:
         plt.xlabel('Packet Number')
         plt.ylabel('Location in file')
         plt.legend(keys, loc = 'lower right')
+        plt.grid()
             
     def save(self, outfilename):
         outfile = open(outfilename, 'wb')
@@ -4467,7 +4487,9 @@ def build_BSCorr(fname1, fname2, which_swath = 0, bs_mean = None, plot_bs = True
         outfile.close()
     assert(not debug)
 
-def plot_extinction(fdir = '.', plot_mean = False, plot_lines = True, modes = []):
+def plot_extinction(fdir = '.', plot_mean = False, plot_lines = True,
+                    modes = [], mindepth = None, maxdepth = None,
+                    maxport = None, maxstbd = None):
     """
     extinction_KM.py
     
@@ -4478,17 +4500,19 @@ def plot_extinction(fdir = '.', plot_mean = False, plot_lines = True, modes = []
     as a function of acrosstrack vs depth with the the mode as the color.
     
     This function can easily be changed to make the backscatter the color instead.
-    
-    This only works with the newer xyz datagram.
     """
     flist = glob(fdir + '/*.all') 
     numf = len(flist)
     infiles = []
     numxyz = []
+    bathy_type = 88
     for f in range(numf):
         infiles.append(useall(flist[f]))
         if infiles[f].map.packdir.has_key('88'):
             numxyz.append(len(infiles[f].map.packdir['88']))
+        elif infiles[f].map.packdir.has_key('68'):
+            numxyz.append(len(infiles[f].map.packdir['68']))
+            bathy_type = 68
         else:
             numxyz.append(0)
     
@@ -4506,16 +4530,26 @@ def plot_extinction(fdir = '.', plot_mean = False, plot_lines = True, modes = []
             mode.append([t,m])
         mode_idx = 0
         for n in range(numxyz[k]):
-            f.getrecord(88, n)
+            f.getrecord(bathy_type, n)
             t = f.packet.gettime()
             if mode[mode_idx][0] <= t and mode_idx < len(mode)-1:
                 mode_idx += 1
             b = f.packet.subpack.data
-            idx = np.nonzero(b['Detection'] < 128)[0] # look for valid detections
-            vals = idx[[1,-1]]
-            points[count:count+2,0] = b['AcrossTrack'][vals]
-            points[count:count+2,1] = b['Depth'][vals]
-            points[count:count+2,2] = b['Reflectivity'][vals]
+            if bathy_type == 88:
+                idx = np.nonzero(b['Detection'] < 128)[0] # look for valid detections
+                vals = idx[[1,-1]]
+                points[count:count+2,0] = b['AcrossTrack'][vals]
+                points[count:count+2,1] = b['Depth'][vals]
+                points[count:count+2,2] = b['Reflectivity'][vals]
+            elif bathy_type == 68:
+                if f.packet.subpack.header['ValidBeams'] > 50:
+                    points[count:count+2,0] = b['AcrossTrack'][[1,-1]]
+                    points[count:count+2,1] = b['Depth'][[1,-1]]
+                    points[count:count+2,2] = b['Reflectivity'][[1,-1]]
+                else:
+                    points[count:count+2,0] = np.nan
+                    points[count:count+2,1] = np.nan
+                    points[count:count+2,2] = np.nan
             markers[count:count+2] = int(mode[mode_idx][1] & 7)
             count +=2
     
@@ -4529,10 +4563,15 @@ def plot_extinction(fdir = '.', plot_mean = False, plot_lines = True, modes = []
     sd, sam = _build_extinction_curve(points[sidx,1],points[sidx,0])
     
     # get the lines indicating the percentage of depth
-    maxd = np.nanmax(points[:,1])
-    minx = np.nanmin(points[:,0])
-    maxx = np.nanmax(points[:,0])
-    lines, labels = _percent_depth_lines(maxd, minx, maxx)    
+    if mindepth == None:
+        mindepth = np.nanmin(points[:,1])
+    if maxdepth == None:
+        maxdepth = np.nanmax(points[:,1])
+    if maxport == None:
+        maxport == 1.05*np.nanmin(points[:,0])
+    if maxstbd == None:
+        maxstbd = 1.05*np.nanmax(points[:,0])
+    lines, labels = _percent_depth_lines(maxdepth, maxport, maxstbd)    
     
     plt.ion()
     
@@ -4567,13 +4606,11 @@ def plot_extinction(fdir = '.', plot_mean = False, plot_lines = True, modes = []
     plt.grid(True)
     ax.set_title('Extinction Depth Test')
     
-    mindepth = np.nanmin(points[:,1])
-    maxdepth = np.nanmax(points[:,1])
     delta = maxdepth - mindepth
     space = 0.05 * delta
 
     ax.set_ylim((maxdepth + space, mindepth - space))
-    ax.set_xlim((1.05*np.nanmin(points[:,0]), 1.05*np.nanmax(points[:,0])))
+    ax.set_xlim((1.05 * maxport, 1.05 * maxstbd))
     
     plt.draw()
     
@@ -4639,7 +4676,7 @@ def _build_extinction_curve(depths, across, binsize = 200):
         am.append( np.sum(avals * winvals) / winvals.sum() ) # window and normalize
     return depthstep, am
     
-def noise_from_passive_wc(path = '.', speed_change_rate = 10, speed_bins = [], extension = 'wcd', which_swath = 'all'):
+def noise_from_passive_wc(path = '.', by_file = True, speed_change_rate = 10, speed_bins = [], extension = 'wcd', which_swath = 'all'):
     """
     Builds an array of noise data by averaging the watercolumn from the files
     at the provided path.  The kwarg speed_change_rate defines the number of
@@ -4660,6 +4697,8 @@ def noise_from_passive_wc(path = '.', speed_change_rate = 10, speed_bins = [], e
     noise = []
 #    pingfft = []
     totalsamples = 0
+    counter = 0
+    tracker = [-1,]
     for f in flist:
         path, fname = os.path.split(f)
         print 'Working on file ' + fname
@@ -4698,7 +4737,8 @@ def noise_from_passive_wc(path = '.', speed_change_rate = 10, speed_bins = [], e
                     wc = 10**(wc/10)
                     noise.append(10 * np.log10(wc.mean(axis = 0)))
                     # pingfft.append(wc_fft.real)#np.squeeze(wc_fft.mean(axis = 1).real))
-                
+                    counter += 1
+        tracker.append(counter)
         a.close()
         if len(altfile) >0:
             b.close()
@@ -4709,46 +4749,75 @@ def noise_from_passive_wc(path = '.', speed_change_rate = 10, speed_bins = [], e
     speeds = np.squeeze(np.asarray(speeds))
     idx = np.argsort(speeds)
     speeds = np.squeeze(speeds[idx])
-    noise = np.squeeze(noise[:,idx])
 #    pingfft = np.squeeze(pingfft[:,idx])
-    if len(speed_bins) == 0:
-        idx, avespeeds = _find_speed_bins(speeds, scr)#, plotfig = True)
-    else:
-        idx, avespeeds = _assign_speed_bins(speeds, speed_bins)
-    numspeeds = len(avespeeds)
-    mean_noise = np.zeros((noise.shape[0],numspeeds))
 #    avg_fft = np.zeros((pingfft.shape[0],numspeeds))
-    for n in range(numspeeds):
-        raw = noise[:,idx[n,0]:idx[n,1]]
-#        fft_by_speed = pingfft[:,idx[n,0]:idx[n,1]]
-        # filter to get rid of the bursts - this is in log space
-        raw_std = raw.std(axis = 1)
-        raw_mean = raw.mean(axis = 1)
-        raw_idx = []
-        # go through each beam for the series and find the indices that are outside of 3std
-        for m in range(raw.shape[0]):
-            temp_idx = np.nonzero((raw[m,:] > raw_mean[m] + 3*raw_std[m])|(raw[m,:] < raw_mean[m] - 3*raw_std[m]))
-            if len(temp_idx) > 0:
-                for k in temp_idx[0]:
-                    raw_idx.append(k)
-        raw_bad_idx = np.array(list(set(raw_idx)))
-        filtered = np.delete(raw, raw_bad_idx, axis = 1)
-#        filtered_fft_by_speed = np.delete(fft_by_speed, raw_bad_idx, axis=1)
-        # take the mean of the remaining data
-        lin_noise = 10**(filtered/10)
-        lin_mean_noise = lin_noise.mean(axis = 1)
-        mean_noise[:,n] = np.squeeze(10 * np.log10(lin_mean_noise))
-#        avg_fft[:,n] = np.squeeze(filtered_fft_by_speed.mean(axis = 1))
+    if by_file == True:
+        avespeeds = []
+        mean_noise = np.zeros((noise.shape[0],len(flist)))
+        for n in range(len(flist)):
+            raw = noise[:,tracker[n]+1:tracker[n+1]]
+            # filter to get rid of the bursts - this is in log space
+            raw_std = raw.std(axis = 1)
+            raw_mean = raw.mean(axis = 1)
+            raw_idx = []
+            # go through each beam for the series and find the indices that are outside of 3std
+            for m in range(raw.shape[0]):
+                temp_idx = np.nonzero((raw[m,:] > raw_mean[m] + 3*raw_std[m])|(raw[m,:] < raw_mean[m] - 3*raw_std[m]))
+                if len(temp_idx) > 0:
+                    for k in temp_idx[0]:
+                        raw_idx.append(k)
+            raw_bad_idx = np.array(list(set(raw_idx)))
+            filtered = np.delete(raw, raw_bad_idx, axis = 1)
+    #        filtered_fft_by_speed = np.delete(fft_by_speed, raw_bad_idx, axis=1)
+            # take the mean of the remaining data
+            lin_noise = 10**(filtered/10)
+            lin_mean_noise = lin_noise.mean(axis = 1)
+            mean_noise[:,n] = np.squeeze(10 * np.log10(lin_mean_noise))
+    #        avg_fft[:,n] = np.squeeze(filtered_fft_by_speed.mean(axis = 1))
+            avespeeds.append(speeds[tracker[n]+1:tracker[n+1]].mean())
+        numspeeds = len(flist)
+    else:
+        noise = np.squeeze(noise[:,idx])
+        if len(speed_bins) == 0:
+            idx, avespeeds = _find_speed_bins(speeds, scr)#, plotfig = True)
+        else:
+            idx, avespeeds = _assign_speed_bins(speeds, speed_bins)
+        numspeeds = len(avespeeds)
+        mean_noise = np.zeros((noise.shape[0],numspeeds))
+        for n in range(numspeeds):
+            raw = noise[:,idx[n,0]:idx[n,1]]
+    #        fft_by_speed = pingfft[:,idx[n,0]:idx[n,1]]
+            # filter to get rid of the bursts - this is in log space
+            raw_std = raw.std(axis = 1)
+            raw_mean = raw.mean(axis = 1)
+            raw_idx = []
+            # go through each beam for the series and find the indices that are outside of 3std
+            for m in range(raw.shape[0]):
+                temp_idx = np.nonzero((raw[m,:] > raw_mean[m] + 3*raw_std[m])|(raw[m,:] < raw_mean[m] - 3*raw_std[m]))
+                if len(temp_idx) > 0:
+                    for k in temp_idx[0]:
+                        raw_idx.append(k)
+            raw_bad_idx = np.array(list(set(raw_idx)))
+            filtered = np.delete(raw, raw_bad_idx, axis = 1)
+    #        filtered_fft_by_speed = np.delete(fft_by_speed, raw_bad_idx, axis=1)
+            # take the mean of the remaining data
+            lin_noise = 10**(filtered/10)
+            lin_mean_noise = lin_noise.mean(axis = 1)
+            mean_noise[:,n] = np.squeeze(10 * np.log10(lin_mean_noise))
+    #        avg_fft[:,n] = np.squeeze(filtered_fft_by_speed.mean(axis = 1))
     # plot all pings
     tickloc = []
     speed_legend = []
     for n in range(len(avespeeds)):
-        tickloc.append(int(idx[n].mean()))
+        if by_file == True:
+            tickloc.append(np.mean([tracker[n]+1,tracker[n+1]]))
+        else:
+            tickloc.append(int(idx[n].mean()))
         speed_legend.append('%0.1f'%(avespeeds[n]))
     plt.figure()
     im = plt.imshow(noise, aspect = 'auto')
     bar = plt.colorbar()
-    bar.set_label('Pressure (dB re $1\mu Pa$ at 1 meter)')
+    bar.set_label('Pressure (dB re $1\mu Pa / \sqrt{Hz}$ )')
     plt.ylabel('Beam Number')
     plt.xlabel('Speed (m/s)')
     plt.title('Passive Mode Noise Tests')
@@ -4770,8 +4839,8 @@ def noise_from_passive_wc(path = '.', speed_change_rate = 10, speed_bins = [], e
     for n in range(numspeeds):
         plt.plot(mean_noise[:,n])
         plt.xlabel('Beam')
-        plt.ylabel('dB re $1\mu Pa$ at 1 meter')
-    plt.legend(speed_legend)
+        plt.ylabel('dB re $1\mu Pa / \sqrt{Hz}$')
+    plt.legend(speed_legend, title = 'Speed (m/s)')
     plt.xlim([0,mean_noise.shape[0]])
     plt.title('Mean Noise by Beam Number')
     plt.grid()
@@ -4886,6 +4955,7 @@ def summarize_directory(directory = '.'):
     Print a summary of all the lines in the directory.
     """
     flist = glob(directory + '/*.all')
+    flist.sort()
     if len(flist) > 0:
         infile = useall(flist[0])
         vals = infile.get_stats(False)
@@ -4898,7 +4968,54 @@ def summarize_directory(directory = '.'):
             info[n] = infile.get_stats(False)
         return info
     else:
-        return none
+        return None
+
+def plot_all_nav(directory = '.'):
+    """
+    Plots the parts of the navarray from all files in the directory.
+    """
+    fig = plt.figure()
+    ax1 = fig.add_subplot(221)
+    ax2 = fig.add_subplot(222)
+    ax3 = fig.add_subplot(614, sharex = ax2)
+    ax4 = fig.add_subplot(615, sharex = ax2)
+    ax5 = fig.add_subplot(616, sharex = ax2)
+    flist = glob(directory + '/*.all')
+    flist.sort()
+    clist = ['b','r','g','k','y','c']
+    n = 0
+    for f in flist:
+        a = allRead(f)
+        if os.path.exists(f + '.nav'):
+            a.load_navarray()
+        else:
+            a._build_navarray()
+            a.save_navarray()
+        ax1.plot(a.navarray['80'][:,1],a.navarray['80'][:,2], clist[n])
+        ax1.set_xlabel('Longitude (Degrees)')
+        ax1.set_ylabel('Latitude (Degrees)')
+        ax1.grid(True)
+        ax2.plot(a.navarray['65'][:,0],a.navarray['65'][:,4], clist[n])
+        ax2.set_ylabel('Heading (Degrees)')
+        ax2.set_xlabel('Time (Seconds)')
+        ax2.grid(True)
+        if a.navarray.has_key('104'):
+            ax3.plot(a.navarray['104'][:,0],a.navarray['104'][:,1], clist[n])
+        ax3.set_ylabel('Height (Meters)')
+        ax3.grid(True)
+        ax4.plot(a.navarray['65'][:,0],a.navarray['65'][:,1], clist[n])
+        ax4.plot(a.navarray['65'][:,0],a.navarray['65'][:,2], clist[n] + '--')
+        ax4.set_ylabel('Degress')
+        ax4.legend(('Roll','Pitch'))
+        ax4.grid(True)
+        ax5.plot(a.navarray['65'][:,0],a.navarray['65'][:,3], clist[n])
+        ax5.set_ylabel('Heave (Meters)')
+        ax5.set_xlabel('Time (Seconds)')
+        ax5.grid(True)
+        n += 1
+        if n >= len(clist):
+            n = 0
+        plt.draw()
 
 def _checksum_all_bytes(bytes):
     # Calculate checksum by sum of bytes method
